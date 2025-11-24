@@ -473,6 +473,7 @@ class GemmaResidualStreamAnalyzer:
         
         # Process each generation step
         prompt_len = self.prompt_token_count
+        first_token_in_step_0 = False
         
         for step_idx, step_hidden_states in enumerate(outputs.hidden_states):
             # step_hidden_states is a tuple of (num_layers + 1) tensors
@@ -487,10 +488,19 @@ class GemmaResidualStreamAnalyzer:
             if step_idx == 0:
                 # First step includes prompt and possibly first generated token
                 token_positions = list(range(current_step_token_count))
+                # Check if first generated token is included in step 0
+                first_token_in_step_0 = (current_step_token_count > prompt_len)
             else:
                 # Subsequent steps only have 1 new token
-                # Note: step_idx=1 corresponds to first generated token at position prompt_len
-                token_positions = [prompt_len + step_idx - 1]
+                # The position depends on whether first token was generated in step 0
+                if first_token_in_step_0:
+                    # First token was at position prompt_len in step 0
+                    # So step 1 is position prompt_len + 1, step 2 is prompt_len + 2, etc.
+                    token_positions = [prompt_len + step_idx]
+                else:
+                    # First token is in step 1 at position prompt_len
+                    # So step 1 is position prompt_len, step 2 is prompt_len + 1, etc.
+                    token_positions = [prompt_len + step_idx - 1]
             
             # Extract hidden states for each layer (including layer 0 which is embeddings)
             for layer_idx in range(0, num_layers + 1):
@@ -538,6 +548,7 @@ class GemmaResidualStreamAnalyzer:
         
         # Process each generation step
         prompt_len = self.prompt_token_count
+        first_token_in_step_0 = False
         
         for step_idx, step_hidden_states in enumerate(outputs.hidden_states):
             current_step_token_count = step_hidden_states[0].shape[1]
@@ -546,10 +557,19 @@ class GemmaResidualStreamAnalyzer:
             if step_idx == 0:
                 # First step includes prompt and possibly first generated token
                 token_positions = list(range(current_step_token_count))
+                # Check if first generated token is included in step 0
+                first_token_in_step_0 = (current_step_token_count > prompt_len)
             else:
                 # Subsequent steps only have 1 new token
-                # Note: step_idx=1 corresponds to first generated token at position prompt_len
-                token_positions = [prompt_len + step_idx - 1]
+                # The position depends on whether first token was generated in step 0
+                if first_token_in_step_0:
+                    # First token was at position prompt_len in step 0
+                    # So step 1 is position prompt_len + 1, step 2 is prompt_len + 2, etc.
+                    token_positions = [prompt_len + step_idx]
+                else:
+                    # First token is in step 1 at position prompt_len
+                    # So step 1 is position prompt_len, step 2 is prompt_len + 1, etc.
+                    token_positions = [prompt_len + step_idx - 1]
             
             # Extract hidden states for each layer (including layer 0 which is embeddings)
             for layer_idx in range(0, num_layers + 1):
@@ -938,30 +958,167 @@ if __name__ == "__main__":
     default_max_tokens = 500
     
     # Command Line Arguments (usage):
-    # python Gemma_2_9B_residual_stream.py [mmlu_path] [question_idx] [prompt_type] [max_tokens]
+    # python residual_stream_extraction.py [mmlu_path] [question_idx] [prompt_type] [max_tokens] [num_tokens_after_prompt]
+    # 
+    # If num_tokens_after_prompt is provided, the script will automatically:
+    # 1. Tokenize the prompt to determine its length
+    # 2. Calculate token range as [prompt_length, prompt_length + num_tokens_after_prompt - 1]
+    # 3. Run in token range mode
+    #
+    # If num_tokens_after_prompt is NOT provided, the script runs in interactive mode (original behavior)
 
     if len(sys.argv) > 1:
         if sys.argv[1] in ["--help", "-h"]:
+            print("\n" + "=" * 80)
+            print("GEMMA-2-9B RESIDUAL STREAM EXTRACTION")
+            print("=" * 80)
+            print("\nUsage:")
+            print("  python residual_stream_extraction.py <mmlu_path> <question_idx> <prompt_type> <max_tokens> [num_tokens_after_prompt]")
+            print("\nArguments:")
+            print("  mmlu_path              Path to MMLU sample dataset JSON file")
+            print("  question_idx           Question index (0-based)")
+            print("  prompt_type            'normal', 'correct_hint', or 'incorrect_hint'")
+            print("  max_tokens             Maximum number of tokens to generate")
+            print("  num_tokens_after_prompt (optional) Number of tokens to capture after prompt ends")
+            print("\nModes:")
+            print("  1. Interactive Mode (no num_tokens_after_prompt):")
+            print("     - Prompts user to specify cutoff position interactively")
+            print("     - Saves all tokens after cutoff position")
+            print()
+            print("  2. Auto-Range Mode (with num_tokens_after_prompt):")
+            print("     - Automatically tokenizes prompt to find start position")
+            print("     - Captures exactly N tokens after prompt ends")
+            print("     - Non-interactive, automated execution")
+            print("\nExamples:")
+            print("  # Interactive mode")
+            print("  python residual_stream_extraction.py mmlu_sample_dataset.json 0 normal 500")
+            print()
+            print("  # Auto-range mode: capture first 5 tokens after prompt")
+            print("  python residual_stream_extraction.py mmlu_sample_dataset.json 0 normal 500 5")
+            print()
+            print("  # Capture first 10 tokens after prompt with incorrect hint")
+            print("  python residual_stream_extraction.py mmlu_sample_dataset.json 5 incorrect_hint 500 10")
+            print("=" * 80)
             sys.exit(0)
         
         mmlu_path = sys.argv[1] if len(sys.argv) > 1 else default_mmlu_path
         question_idx = int(sys.argv[2]) if len(sys.argv) > 2 else default_question_idx
         prompt_type = sys.argv[3] if len(sys.argv) > 3 else default_prompt_type
         max_tokens = int(sys.argv[4]) if len(sys.argv) > 4 else default_max_tokens
+        num_tokens_after_prompt = int(sys.argv[5]) if len(sys.argv) > 5 else None
     else:
         mmlu_path = default_mmlu_path
         question_idx = default_question_idx
         prompt_type = default_prompt_type
         max_tokens = default_max_tokens
+        num_tokens_after_prompt = None
     
-    # Run the interactive analysis
+    # Run the analysis
     try:
-        run_interactive_analysis(
-            mmlu_json_path=mmlu_path,
-            question_idx=question_idx,
-            prompt_type=prompt_type,
-            max_new_tokens=max_tokens
-        )
+        if num_tokens_after_prompt is not None:
+            # AUTO-RANGE MODE: Capture N tokens after prompt
+            print("=" * 80)
+            print("AUTO-RANGE MODE: Capturing first N tokens after prompt")
+            print("=" * 80)
+            print(f"Number of tokens to capture: {num_tokens_after_prompt}")
+            
+            # Initialize analyzer to tokenize prompt
+            analyzer = GemmaResidualStreamAnalyzer(device="auto")
+            
+            # Load tokenizer (no need for full model yet)
+            print(f"\nLoading tokenizer for {analyzer.model_name}...")
+            from transformers import AutoTokenizer
+            analyzer.tokenizer = AutoTokenizer.from_pretrained(analyzer.model_name)
+            print("✅ Tokenizer loaded")
+            
+            # Load MMLU dataset
+            questions = analyzer.load_mmlu_dataset(mmlu_path)
+            
+            # Validate question index
+            if question_idx >= len(questions):
+                print(f"❌ Error: Question index {question_idx} out of range (0-{len(questions)-1})")
+                sys.exit(1)
+            
+            question_data = questions[question_idx]
+            
+            # Format prompt based on type
+            print(f"\n📋 Formatting prompt with type: {prompt_type}")
+            
+            if prompt_type == "normal":
+                prompt = analyzer.format_question_prompt(question_data)
+            elif prompt_type == "correct_hint":
+                prompt, _ = analyzer.format_question_prompt_correct_hint(question_data)
+            elif prompt_type == "incorrect_hint":
+                prompt, _ = analyzer.format_question_prompt_incorrect_hint(question_data)
+            else:
+                print(f"❌ Error: Invalid prompt type '{prompt_type}'")
+                print("   Valid types: 'normal', 'correct_hint', 'incorrect_hint'")
+                sys.exit(1)
+            
+            # Tokenize prompt to determine length
+            print("\n🔤 Tokenizing prompt to determine start position...")
+            inputs = analyzer.tokenizer(prompt, return_tensors="pt")
+            prompt_length = inputs['input_ids'].shape[1]
+            print(f"   Prompt length: {prompt_length} tokens")
+            print(f"   Last prompt token position: {prompt_length - 1}")
+            
+            # Calculate token range
+            # Start from prompt_length - 1 to capture hidden states used to predict first generated token
+            # This is because hidden states at position N are used to predict token at position N+1
+            start_pos = prompt_length - 1
+            end_pos = prompt_length - 1 + num_tokens_after_prompt - 1
+            
+            print(f"\n📍 Calculated token range: [{start_pos}, {end_pos}]")
+            print(f"   This will capture hidden states at positions {start_pos} to {end_pos}")
+            print(f"   These hidden states predict tokens at positions {start_pos+1} to {end_pos+1}")
+            print(f"   Token positions: {list(range(start_pos, end_pos + 1))}")
+            
+            # Now load full model and run analysis
+            analyzer.load_model()
+            
+            result = analyzer.run_inference_with_hidden_states_for_range(
+                prompt,
+                token_range=(start_pos, end_pos),
+                max_new_tokens=max_tokens
+            )
+            
+            print("\n" + "=" * 80)
+            print("MODEL RESPONSE:")
+            print("=" * 80)
+            print(result['response'])
+            print("\n" + "=" * 80)
+            
+            # Save results
+            print("\n" + "=" * 80)
+            print("SAVING RESULTS")
+            print("=" * 80)
+            
+            output_file = analyzer.save_results(result, question_data, prompt_type)
+            
+            print("\n" + "=" * 80)
+            print("✅ ANALYSIS COMPLETE!")
+            print("=" * 80)
+            print(f"Results saved to: {output_file}")
+            print(f"\nSummary:")
+            print(f"  - Question: {question_data['question'][:60]}...")
+            print(f"  - Prompt type: {prompt_type}")
+            print(f"  - Prompt length: {prompt_length} tokens")
+            print(f"  - Total tokens generated: {result['total_token_count']}")
+            print(f"  - Token range captured: [{start_pos}, {end_pos}]")
+            print(f"  - Tokens saved: {num_tokens_after_prompt}")
+            print(f"  - Layers: {analyzer.model.config.num_hidden_layers + 1} (1 embedding + {analyzer.model.config.num_hidden_layers} transformer)")
+            print(f"  - Hidden size: {analyzer.model.config.hidden_size}")
+            print("=" * 80)
+            
+        else:
+            # INTERACTIVE MODE: Original behavior
+            run_interactive_analysis(
+                mmlu_json_path=mmlu_path,
+                question_idx=question_idx,
+                prompt_type=prompt_type,
+                max_new_tokens=max_tokens
+            )
+            
     except KeyboardInterrupt:
         print("\n\n⚠️  Analysis interrupted by user.")
     except Exception as e:
