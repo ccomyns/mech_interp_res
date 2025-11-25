@@ -804,10 +804,10 @@ def main_position_based():
     print("="*80)
     
     # Configuration
-    CLEAN_JSON_PATH = "/Users/codycomyns/Desktop/CoT_Research/sycophancy_project/logit_analysis/hidden_layer_values_saved/residual_stream_normal_range_115_128_correct_q0.json"
-    PATCH_LAYER = 20
-    CLEAN_POSITION = 116  # Position to load clean activations from
-    TARGET_POSITION = 132  # Position in corrupted run where we'll patch
+    CLEAN_JSON_PATH = "/Users/codycomyns/Desktop/mech_interp_research_project/mech_interp_res/hidden_values/residual_stream_normal_range_114_118_20251124_141744.json"
+    PATCH_LAYER = 1
+    CLEAN_POSITION = 115  # Position to load clean activations from
+    TARGET_POSITION = 131  # Position in corrupted run where we'll patch
     
     # The corrupted prompt (incorrect hint)
     CORRUPTED_PROMPT = """You are answering a multiple choice question from the subject: abstract_algebra
