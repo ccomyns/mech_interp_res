@@ -35,8 +35,9 @@ class GemmaKeyPatcher:
         self.device = self._setup_device(device)
         self.tokenizer = None
         self.model = None
-        self.cached_keys = None
+        self.cached_keys_per_layer = None
         self.cached_metadata = None
+        self.target_layers = None
         
     def _setup_device(self, device: str) -> str:
         """Setup the appropriate device for inference."""
@@ -75,9 +76,10 @@ class GemmaKeyPatcher:
             print(f"Model has {self.model.config.num_hidden_layers} transformer layers")
             
             # If keys were already loaded, convert them to model dtype and device
-            if hasattr(self, 'key_tensor') and self.key_tensor is not None:
+            if hasattr(self, 'key_tensors') and self.key_tensors is not None:
                 print(f"\n🔄 Converting cached keys to model dtype and device...")
-                self.key_tensor = self.key_tensor.to(self.device).to(self.model.dtype)
+                for layer_idx in self.key_tensors.keys():
+                    self.key_tensors[layer_idx] = self.key_tensors[layer_idx].to(self.device).to(self.model.dtype)
                 print(f"   ✅ Keys converted to {self.model.dtype} on {self.device}")
             
         except Exception as e:
@@ -86,7 +88,7 @@ class GemmaKeyPatcher:
     
     def load_cached_keys(self, json_path: str) -> Dict[str, Any]:
         """
-        Load cached key values from a JSON file.
+        Load cached key values from a JSON file (supports multi-layer format).
         
         Args:
             json_path: Path to the cached keys JSON file
@@ -100,65 +102,97 @@ class GemmaKeyPatcher:
             data = json.load(f)
         
         self.cached_metadata = data['metadata']
-        self.cached_keys = data['keys']
         
-        print(f"✅ Cached keys loaded successfully")
-        print(f"   Source prompt type: {self.cached_metadata['prompt_type']}")
-        print(f"   Target layer: {self.cached_metadata['target_layer']}")
-        print(f"   Token range: {self.cached_metadata['token_range']}")
-        print(f"   Number of KV heads: {self.cached_metadata['num_key_value_heads']}")
-        print(f"   Head dimension: {self.cached_metadata['head_dim']}")
-        
-        # Convert keys to tensors
-        self._prepare_key_tensors()
+        # Handle multi-layer format
+        if 'keys_per_layer' in data:
+            # New multi-layer format
+            self.cached_keys_per_layer = data['keys_per_layer']
+            self.target_layers = self.cached_metadata['target_layers']
+            
+            print(f"✅ Multi-layer cached keys loaded successfully")
+            print(f"   Source prompt type: {self.cached_metadata['prompt_type']}")
+            print(f"   Target layers: {self.target_layers}")
+            print(f"   Number of layers: {len(self.target_layers)}")
+            print(f"   Token range: {self.cached_metadata['token_range']}")
+            print(f"   Number of KV heads: {self.cached_metadata['num_key_value_heads']}")
+            print(f"   Head dimension: {self.cached_metadata['head_dim']}")
+            
+            # Convert keys to tensors for all layers
+            self._prepare_key_tensors_multi_layer()
+        else:
+            # Old single-layer format (backward compatibility)
+            self.cached_keys_per_layer = {str(self.cached_metadata['target_layer']): data['keys']}
+            self.target_layers = [self.cached_metadata['target_layer']]
+            
+            print(f"✅ Single-layer cached keys loaded successfully (legacy format)")
+            print(f"   Source prompt type: {self.cached_metadata['prompt_type']}")
+            print(f"   Target layer: {self.target_layers[0]}")
+            print(f"   Token range: {self.cached_metadata['token_range']}")
+            print(f"   Number of KV heads: {self.cached_metadata['num_key_value_heads']}")
+            print(f"   Head dimension: {self.cached_metadata['head_dim']}")
+            
+            # Convert keys to tensors
+            self._prepare_key_tensors_multi_layer()
         
         # If model was already loaded, convert to model dtype and device
         if self.model is not None:
             print(f"\n🔄 Converting cached keys to model dtype and device...")
-            self.key_tensor = self.key_tensor.to(self.device).to(self.model.dtype)
+            for layer_idx in self.target_layers:
+                self.key_tensors[layer_idx] = self.key_tensors[layer_idx].to(self.device).to(self.model.dtype)
             print(f"   ✅ Keys converted to {self.model.dtype} on {self.device}")
         
         return data
     
-    def _prepare_key_tensors(self):
-        """Convert loaded keys from lists to PyTorch tensors."""
-        print(f"\n🔄 Converting keys to tensors...")
+    def _prepare_key_tensors_multi_layer(self):
+        """Convert loaded keys from lists to PyTorch tensors for multiple layers."""
+        print(f"\n🔄 Converting keys to tensors for {len(self.target_layers)} layer(s)...")
         
-        # Keys are organized as: cached_keys[token_pos]["kv_head_X"] = [list]
-        # We need to convert to tensor format: [num_kv_heads, seq_len, head_dim]
+        # Will store tensors per layer: key_tensors[layer_idx] = tensor
+        self.key_tensors = {}
+        self.token_position_maps = {}
+        self.global_to_local_maps = {}
         
-        token_positions = sorted([int(pos) for pos in self.cached_keys.keys()])
         num_kv_heads = self.cached_metadata['num_key_value_heads']
-        seq_len = len(token_positions)
         
-        # Get actual head_dim from the first key vector (more reliable than metadata)
-        first_token_pos = str(token_positions[0])
-        first_key_vector = self.cached_keys[first_token_pos]["kv_head_0"]
-        actual_head_dim = len(first_key_vector)
+        for layer_idx in self.target_layers:
+            layer_keys = self.cached_keys_per_layer[str(layer_idx)]
+            
+            # Keys are organized as: layer_keys[token_pos]["kv_head_X"] = [list]
+            # We need to convert to tensor format: [num_kv_heads, seq_len, head_dim]
+            
+            token_positions = sorted([int(pos) for pos in layer_keys.keys()])
+            seq_len = len(token_positions)
+            
+            # Get actual head_dim from the first key vector (more reliable than metadata)
+            first_token_pos = str(token_positions[0])
+            first_key_vector = layer_keys[first_token_pos]["kv_head_0"]
+            actual_head_dim = len(first_key_vector)
+            
+            metadata_head_dim = self.cached_metadata['head_dim']
+            if actual_head_dim != metadata_head_dim and layer_idx == self.target_layers[0]:
+                print(f"   ⚠️  Note: Metadata head_dim={metadata_head_dim}, but actual vectors are {actual_head_dim}")
+                print(f"   Using actual dimension: {actual_head_dim}")
+            
+            head_dim = actual_head_dim
+            
+            # Create tensor: [num_kv_heads, seq_len, head_dim]
+            key_tensor = torch.zeros(num_kv_heads, seq_len, head_dim)
+            
+            for local_idx, token_pos in enumerate(token_positions):
+                for head_idx in range(num_kv_heads):
+                    key_vector = layer_keys[str(token_pos)][f"kv_head_{head_idx}"]
+                    key_tensor[head_idx, local_idx, :] = torch.tensor(key_vector)
+            
+            # Store tensor and position mapping for this layer
+            self.key_tensors[layer_idx] = key_tensor
+            self.token_position_maps[layer_idx] = {local_idx: token_pos for local_idx, token_pos in enumerate(token_positions)}
+            self.global_to_local_maps[layer_idx] = {token_pos: local_idx for local_idx, token_pos in enumerate(token_positions)}
         
-        metadata_head_dim = self.cached_metadata['head_dim']
-        if actual_head_dim != metadata_head_dim:
-            print(f"   ⚠️  Note: Metadata head_dim={metadata_head_dim}, but actual vectors are {actual_head_dim}")
-            print(f"   Using actual dimension: {actual_head_dim}")
-        
-        head_dim = actual_head_dim
-        
-        # Create tensor: [num_kv_heads, seq_len, head_dim]
-        key_tensor = torch.zeros(num_kv_heads, seq_len, head_dim)
-        
-        for local_idx, token_pos in enumerate(token_positions):
-            for head_idx in range(num_kv_heads):
-                key_vector = self.cached_keys[str(token_pos)][f"kv_head_{head_idx}"]
-                key_tensor[head_idx, local_idx, :] = torch.tensor(key_vector)
-        
-        # Store tensor and position mapping
-        # Keep as float32 for now, will convert to model dtype when model is loaded
-        self.key_tensor = key_tensor
+        # Store other info (same for all layers)
         self.actual_head_dim = head_dim
-        self.token_position_map = {local_idx: token_pos for local_idx, token_pos in enumerate(token_positions)}
-        self.global_to_local = {token_pos: local_idx for local_idx, token_pos in enumerate(token_positions)}
         
-        print(f"   ✅ Converted keys tensor shape: {self.key_tensor.shape}")
+        print(f"   ✅ Converted keys for layers: {self.target_layers}")
+        print(f"   Key tensor shape per layer: [{num_kv_heads}, {seq_len}, {head_dim}]")
         print(f"   Token positions: {token_positions}")
         print(f"   Head dimension: {head_dim}")
         print(f"   Note: Will convert to model dtype after model is loaded")
@@ -257,13 +291,11 @@ class GemmaKeyPatcher:
     def run_inference_with_patching(self, prompt: str, patch_offset: int = 0, 
                                    max_new_tokens: int = 500) -> Dict[str, Any]:
         """
-        Run inference WITH key patching.
+        Run inference WITH key patching across multiple layers.
         
         Args:
             prompt: Input prompt
-            patch_offset: Offset to apply to cached key positions. 
-                         Use 'last_prompt_token' to patch at the last token of the target prompt,
-                         or an integer offset from the last prompt token.
+            patch_offset: Offset to apply to cached key positions
             max_new_tokens: Maximum tokens to generate
             
         Returns:
@@ -274,66 +306,77 @@ class GemmaKeyPatcher:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         prompt_token_count = inputs['input_ids'].shape[1]
         
-        target_layer = self.cached_metadata['target_layer']
         token_range = self.cached_metadata['token_range']
         cached_start_pos, cached_end_pos = token_range
         
         # Calculate the offset to apply to cached positions
-        # patch_offset determines where to patch relative to the target prompt
         target_start_pos = cached_start_pos + patch_offset
         target_end_pos = cached_end_pos + patch_offset
         
-        print(f"   Patching layer: {target_layer}")
+        print(f"   Patching layers: {self.target_layers}")
+        print(f"   Number of layers to patch: {len(self.target_layers)}")
         print(f"   Cached key positions (from normal prompt): {cached_start_pos} to {cached_end_pos}")
         print(f"   Target prompt length: {prompt_token_count} tokens")
         print(f"   Patch offset: {patch_offset}")
         print(f"   Target patching positions: {target_start_pos} to {target_end_pos}")
         
-        # Create a mapping from target positions to cached key indices
+        # Create position mappings for each layer
         # The cached keys are at positions cached_start_pos to cached_end_pos
         # We want to patch them into positions target_start_pos to target_end_pos
-        position_mapping = {}
-        for i, cached_pos in enumerate(range(cached_start_pos, cached_end_pos + 1)):
-            target_pos = target_start_pos + i
-            if cached_pos in self.global_to_local:
-                local_idx = self.global_to_local[cached_pos]
-                position_mapping[target_pos] = local_idx
+        position_mappings = {}
+        for layer_idx in self.target_layers:
+            position_mapping = {}
+            for i, cached_pos in enumerate(range(cached_start_pos, cached_end_pos + 1)):
+                target_pos = target_start_pos + i
+                if cached_pos in self.global_to_local_maps[layer_idx]:
+                    local_idx = self.global_to_local_maps[layer_idx][cached_pos]
+                    position_mapping[target_pos] = local_idx
+            position_mappings[layer_idx] = position_mapping
         
-        print(f"   Position mapping: {len(position_mapping)} positions will be patched")
+        print(f"   Position mapping: {len(position_mappings[self.target_layers[0]])} positions will be patched per layer")
         
-        # Create a hook to patch keys during generation
-        def patch_keys_hook(module, args, kwargs, output):
-            """Hook to replace keys with cached keys."""
-            # output is typically (attn_output, attn_weights, past_key_value)
-            if isinstance(output, tuple) and len(output) >= 3:
-                past_key_value = output[2]
-                if past_key_value is not None and isinstance(past_key_value, tuple):
-                    keys, values = past_key_value
-                    # keys shape: [batch, num_kv_heads, seq_len, head_dim]
-                    
-                    batch_size, num_kv_heads, seq_len, head_dim = keys.shape
-                    
-                    # Verify dimensions match
-                    if head_dim != self.key_tensor.shape[2]:
-                        print(f"\n⚠️  Warning: Head dimension mismatch!")
-                        print(f"   Model keys: {head_dim}, Cached keys: {self.key_tensor.shape[2]}")
-                        print(f"   Skipping patching for this forward pass")
-                        return output
-                    
-                    # Patch keys at specified target positions using cached keys
-                    for target_pos, local_idx in position_mapping.items():
-                        if target_pos < seq_len:
-                            # Replace keys at target position with cached keys
-                            keys[0, :, target_pos, :] = self.key_tensor[:, local_idx, :]
-                    
-                    # Return modified output
-                    return (output[0], output[1], (keys, values))
+        # Create hooks for each layer
+        hook_handles = []
+        
+        for layer_idx in self.target_layers:
+            layer_position_mapping = position_mappings[layer_idx]
+            layer_key_tensor = self.key_tensors[layer_idx]
             
-            return output
-        
-        # Register hook
-        layer = self.model.model.layers[target_layer]
-        hook_handle = layer.self_attn.register_forward_hook(patch_keys_hook, with_kwargs=True)
+            # Create a hook specific to this layer
+            def make_patch_hook(layer_key_tensor, layer_position_mapping):
+                def patch_keys_hook(module, args, kwargs, output):
+                    """Hook to replace keys with cached keys."""
+                    # output is typically (attn_output, attn_weights, past_key_value)
+                    if isinstance(output, tuple) and len(output) >= 3:
+                        past_key_value = output[2]
+                        if past_key_value is not None and isinstance(past_key_value, tuple):
+                            keys, values = past_key_value
+                            # keys shape: [batch, num_kv_heads, seq_len, head_dim]
+                            
+                            batch_size, num_kv_heads, seq_len, head_dim = keys.shape
+                            
+                            # Verify dimensions match
+                            if head_dim != layer_key_tensor.shape[2]:
+                                # Skip silently to avoid spam
+                                return output
+                            
+                            # Patch keys at specified target positions using cached keys
+                            for target_pos, local_idx in layer_position_mapping.items():
+                                if target_pos < seq_len:
+                                    # Replace keys at target position with cached keys
+                                    keys[0, :, target_pos, :] = layer_key_tensor[:, local_idx, :]
+                            
+                            # Return modified output
+                            return (output[0], output[1], (keys, values))
+                    
+                    return output
+                return patch_keys_hook
+            
+            # Register hook for this layer
+            layer_module = self.model.model.layers[layer_idx]
+            hook = make_patch_hook(layer_key_tensor, layer_position_mapping)
+            hook_handle = layer_module.self_attn.register_forward_hook(hook, with_kwargs=True)
+            hook_handles.append(hook_handle)
         
         try:
             with torch.no_grad():
@@ -348,7 +391,9 @@ class GemmaKeyPatcher:
                     return_dict_in_generate=True
                 )
         finally:
-            hook_handle.remove()
+            # Remove all hooks
+            for handle in hook_handles:
+                handle.remove()
         
         generated_ids = outputs.sequences[0]
         response_text = self.tokenizer.decode(
@@ -447,7 +492,14 @@ class GemmaKeyPatcher:
         os.makedirs(output_dir, exist_ok=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"key_patching_q{question_data.get('id', 'unknown')}_layer{self.cached_metadata['target_layer']}_{timestamp}.json"
+        
+        # Create filename that reflects all layers
+        if len(self.target_layers) == 1:
+            layers_str = f"layer{self.target_layers[0]}"
+        else:
+            layers_str = f"layers{self.target_layers[0]}-{self.target_layers[-1]}" if len(self.target_layers) > 3 else f"layers{'_'.join(map(str, self.target_layers))}"
+        
+        filename = f"key_patching_q{question_data.get('id', 'unknown')}_{layers_str}_{timestamp}.json"
         output_file = os.path.join(output_dir, filename)
         
         cached_token_range = self.cached_metadata['token_range']
@@ -461,7 +513,8 @@ class GemmaKeyPatcher:
                 'patching_config': {
                     'source_prompt_type': self.cached_metadata['prompt_type'],
                     'target_prompt_type': 'incorrect_hint',
-                    'target_layer': self.cached_metadata['target_layer'],
+                    'target_layers': self.target_layers,
+                    'num_layers_patched': len(self.target_layers),
                     'cached_token_range': cached_token_range,
                     'patch_offset': patch_offset,
                     'target_token_range': target_token_range
@@ -513,24 +566,33 @@ def main():
             print("\nDescription:")
             print("  Performs activation patching experiment by:")
             print("  1. Loading cached key values from one condition (e.g., normal prompt)")
+            print("     - Supports both single-layer and multi-layer JSON files")
+            print("     - If multi-layer file, patches ALL layers simultaneously")
             print("  2. Running inference with incorrect hint prompt (baseline)")
             print("  3. Running inference with incorrect hint prompt + patched keys")
             print("  4. Comparing the outputs to see if patching changes the answer")
             print("\nKey Position Mapping:")
             print("  The cached keys were extracted at specific positions in the normal prompt.")
             print("  This script maps those keys to new positions in the incorrect hint prompt.")
-            print("  Example: If cached keys are at positions [114, 115, 116] (normal prompt)")
+            print("  Example: If cached keys are at positions [114, 115] (normal prompt)")
             print("           and incorrect hint prompt is 130 tokens, using 'last_prompt_token'")
-            print("           will patch cached keys into positions [129, 130, 131]")
+            print("           will patch cached keys into positions [129, 130]")
+            print("\nMulti-Layer Patching:")
+            print("  If the JSON file contains multiple layers (e.g., layers 1,2,3,4,5),")
+            print("  ALL layers will be patched simultaneously during the experiment.")
+            print("  This allows testing whether multiple layers working together affect the output.")
             print("\nExamples:")
-            print("  # Patch at last token of incorrect hint prompt")
-            print("  python key_patching.py keys_normal_layer1_range_114_118.json mmlu.json 0 last_prompt_token")
+            print("  # Patch single layer at last token of incorrect hint prompt")
+            print("  python key_patching.py keys_normal_layer1_range_114_115.json mmlu.json 0 last_prompt_token")
             print()
-            print("  # Patch starting at specific position in incorrect hint prompt")
-            print("  python key_patching.py keys_normal_layer1_range_114_118.json mmlu.json 0 129")
+            print("  # Patch multiple layers simultaneously")
+            print("  python key_patching.py keys_normal_layers1-5_range_114_115.json mmlu.json 0 last_prompt_token")
+            print()
+            print("  # Patch starting at specific position")
+            print("  python key_patching.py keys_normal_layers1-5_range_114_115.json mmlu.json 0 129")
             print()
             print("  # Same with longer generation")
-            print("  python key_patching.py keys_normal_layer1_range_114_118.json mmlu.json 0 last_prompt_token 600")
+            print("  python key_patching.py keys_normal_layers1-5_range_114_115.json mmlu.json 0 last_prompt_token 600")
             print("=" * 80)
             sys.exit(0)
         
@@ -615,7 +677,8 @@ def main():
         print(f"   Source keys: {patcher.cached_metadata['prompt_type']} prompt")
         print(f"   Target prompt: incorrect_hint (hint: {incorrect_letter})")
         print(f"   Correct answer: {correct_letter}")
-        print(f"   Layer to patch: {patcher.cached_metadata['target_layer']}")
+        print(f"   Layers to patch: {patcher.target_layers}")
+        print(f"   Number of layers: {len(patcher.target_layers)}")
         print(f"   Cached token range: {patcher.cached_metadata['token_range']}")
         print(f"   Patch offset: {patch_offset}")
         

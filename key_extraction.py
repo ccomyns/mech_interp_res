@@ -348,9 +348,9 @@ class GemmaKeyValueExtractor:
         return organized_keys
     
     def save_results(self, result: Dict[str, Any], question_data: Dict[str, Any],
-                    prompt_type: str, output_dir: str = "key_values") -> List[str]:
+                    prompt_type: str, output_dir: str = "key_values") -> str:
         """
-        Save key extraction results to JSON files (one per layer).
+        Save key extraction results to a single JSON file containing all layers.
         
         Args:
             result: Inference result dictionary with keys per layer
@@ -359,7 +359,7 @@ class GemmaKeyValueExtractor:
             output_dir: Directory to save results
             
         Returns:
-            List of paths to saved files
+            Path to saved file
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -369,79 +369,83 @@ class GemmaKeyValueExtractor:
         target_layers = result['target_layers']
         keys_per_layer = result['keys_per_layer']
         
-        output_files = []
+        # Create filename that reflects all layers
+        if len(target_layers) == 1:
+            layers_str = f"layer{target_layers[0]}"
+        else:
+            layers_str = f"layers{target_layers[0]}-{target_layers[-1]}" if len(target_layers) > 3 else f"layers{'_'.join(map(str, target_layers))}"
         
-        # Save a separate file for each layer
-        for layer_idx in target_layers:
-            filename = f"keys_{prompt_type}_layer{layer_idx}_range_{start_pos}_{end_pos}_{timestamp}.json"
-            output_file = os.path.join(output_dir, filename)
-
-            
-            # Prepare metadata for this layer
-            metadata = {
-                'model_name': self.model_name,
-                'analysis_date': datetime.now().isoformat(),
-                'device': self.device,
-                'num_layers': self.model.config.num_hidden_layers,
-                'target_layer': layer_idx,
-                'num_attention_heads': self.model.config.num_attention_heads,
-                'num_key_value_heads': self.model.config.num_key_value_heads,
-                'head_dim': self.model.config.hidden_size // self.model.config.num_attention_heads,
-                'hidden_size': self.model.config.hidden_size,
-                'prompt_type': prompt_type,
-                'token_range': result['token_range']
-            }
-            
-            # Prepare token info
-            token_info = {
-                'prompt_token_count': result['prompt_token_count'],
-                'total_token_count': result['total_token_count'],
-                'token_range': result['token_range'],
-                'saved_token_count': end_pos - start_pos + 1,
-                'all_tokens': result['all_tokens']
-            }
-            
-            # Generate description
-            description = (
-                f"Attention key values at layer {layer_idx} "
-                f"for tokens in range [{start_pos}, {end_pos}] (inclusive). "
-                f"Keys are organized by token position and KV head. "
-                f"Each key vector has dimension {metadata['head_dim']}. "
-                f"The model uses Grouped-Query Attention (GQA): "
-                f"{metadata['num_attention_heads']} query heads share "
-                f"{metadata['num_key_value_heads']} key-value heads. "
-                f"Each KV head is shared by {metadata['num_attention_heads'] // metadata['num_key_value_heads']} query heads."
-            )
-            
-            # Prepare output data for this layer
-            output_data = {
-                'metadata': metadata,
-                'question_info': {
-                    'question': question_data['question'],
-                    'choices': question_data['choices'],
-                    'correct_answer_idx': question_data['answer'],
-                    'correct_answer_letter': chr(65 + question_data['answer']),
-                    'subject': question_data['subject']
-                },
-                'prompt': result['prompt'],
-                'response': result['response'],
-                'full_text': result['full_text'],
-                'token_info': token_info,
-                'keys': keys_per_layer[layer_idx],
-                'description': description
-            }
-            
-            # Save to file
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(output_data, f, indent=2, ensure_ascii=False)
-            
-            print(f"   💾 Layer {layer_idx} saved to: {filename}")
-            print(f"      File size: {os.path.getsize(output_file) / (1024*1024):.2f} MB")
-            
-            output_files.append(output_file)
+        filename = f"keys_{prompt_type}_{layers_str}_range_{start_pos}_{end_pos}_{timestamp}.json"
+        output_file = os.path.join(output_dir, filename)
         
-        print(f"\n✅ Saved {len(output_files)} files total")
-        return output_files
+        # Prepare metadata
+        metadata = {
+            'model_name': self.model_name,
+            'analysis_date': datetime.now().isoformat(),
+            'device': self.device,
+            'num_layers': self.model.config.num_hidden_layers,
+            'target_layers': target_layers,
+            'num_attention_heads': self.model.config.num_attention_heads,
+            'num_key_value_heads': self.model.config.num_key_value_heads,
+            'head_dim': self.model.config.hidden_size // self.model.config.num_attention_heads,
+            'hidden_size': self.model.config.hidden_size,
+            'prompt_type': prompt_type,
+            'token_range': result['token_range']
+        }
+        
+        # Prepare token info
+        token_info = {
+            'prompt_token_count': result['prompt_token_count'],
+            'total_token_count': result['total_token_count'],
+            'token_range': result['token_range'],
+            'saved_token_count': end_pos - start_pos + 1,
+            'all_tokens': result['all_tokens']
+        }
+        
+        # Generate description
+        if len(target_layers) == 1:
+            layers_desc = f"layer {target_layers[0]}"
+        else:
+            layers_desc = f"layers {target_layers}"
+        
+        description = (
+            f"Attention key values at {layers_desc} "
+            f"for tokens in range [{start_pos}, {end_pos}] (inclusive). "
+            f"Keys are organized by layer, then by token position and KV head. "
+            f"Each key vector has dimension {metadata['head_dim']}. "
+            f"The model uses Grouped-Query Attention (GQA): "
+            f"{metadata['num_attention_heads']} query heads share "
+            f"{metadata['num_key_value_heads']} key-value heads. "
+            f"Each KV head is shared by {metadata['num_attention_heads'] // metadata['num_key_value_heads']} query heads."
+        )
+        
+        # Prepare output data with all layers
+        output_data = {
+            'metadata': metadata,
+            'question_info': {
+                'question': question_data['question'],
+                'choices': question_data['choices'],
+                'correct_answer_idx': question_data['answer'],
+                'correct_answer_letter': chr(65 + question_data['answer']),
+                'subject': question_data['subject']
+            },
+            'prompt': result['prompt'],
+            'response': result['response'],
+            'full_text': result['full_text'],
+            'token_info': token_info,
+            'keys_per_layer': keys_per_layer,  # All layers in one structure
+            'description': description
+        }
+        
+        # Save to file
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n💾 Results saved to: {filename}")
+        print(f"   File size: {os.path.getsize(output_file) / (1024*1024):.2f} MB")
+        print(f"   Layers included: {target_layers}")
+        
+        return output_file
 
 
 def main():
@@ -616,18 +620,18 @@ def main():
         print(result['response'])
         print("\n" + "=" * 80)
         
-        # Save results (one file per layer)
+        # Save results (all layers in one file)
         print("\n" + "=" * 80)
         print("SAVING RESULTS")
         print("=" * 80)
         
-        output_files = extractor.save_results(result, question_data, prompt_type)
+        output_file = extractor.save_results(result, question_data, prompt_type)
         
         print("\n" + "=" * 80)
         print("✅ EXTRACTION COMPLETE!")
         print("=" * 80)
         print(f"Extracted keys from {len(target_layers)} layer(s): {target_layers}")
-        print(f"Saved {len(output_files)} file(s) to key_values/")
+        print(f"Saved to: {os.path.basename(output_file)}")
         print(f"\nSummary:")
         print(f"  - Question: {question_data['question'][:60]}...")
         print(f"  - Prompt type: {prompt_type}")
@@ -641,9 +645,6 @@ def main():
         print(f"    • KV heads captured: {extractor.model.config.num_key_value_heads}")
         print(f"    • Head dimension: {extractor.model.config.hidden_size // extractor.model.config.num_attention_heads}")
         print(f"    • Sharing ratio: {extractor.model.config.num_attention_heads // extractor.model.config.num_key_value_heads} query heads per KV head")
-        print("\nFiles saved:")
-        for i, filepath in enumerate(output_files, 1):
-            print(f"  {i}. {os.path.basename(filepath)}")
         print("=" * 80)
         
     except KeyboardInterrupt:
