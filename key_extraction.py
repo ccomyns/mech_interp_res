@@ -177,25 +177,25 @@ class GemmaKeyValueExtractor:
         
         return prompt, incorrect_letter
     
-    def run_inference_and_capture_keys(self, prompt: str, target_layer: int, 
+    def run_inference_and_capture_keys(self, prompt: str, target_layers: List[int], 
                                        token_range: Tuple[int, int],
                                        max_new_tokens: int = 500) -> Dict[str, Any]:
         """
-        Run inference while capturing key values at a specific layer for a token range.
+        Run inference while capturing key values at multiple layers for a token range.
         
         Args:
             prompt: Input prompt
-            target_layer: Layer index to capture keys from (0 to num_layers - 1)
+            target_layers: List of layer indices to capture keys from (0 to num_layers - 1)
             token_range: Tuple of (start_position, end_position) for tokens to capture
             max_new_tokens: Maximum tokens to generate
             
         Returns:
-            Dictionary containing response, tokens, and captured keys
+            Dictionary containing response, tokens, and captured keys per layer
         """
         start_pos, end_pos = token_range
         
         print("\n🤖 Running inference with key capture...")
-        print(f"   Target layer: {target_layer}")
+        print(f"   Target layers: {target_layers}")
         print(f"   Token range: {start_pos} to {end_pos} (inclusive)")
         print(f"   Will capture keys for {end_pos - start_pos + 1} tokens")
         
@@ -248,12 +248,18 @@ class GemmaKeyValueExtractor:
             print(f"   Adjusting end position to {len(generated_ids) - 1}")
             end_pos = len(generated_ids) - 1
         
-        # Extract keys from hidden_states using a forward pass
-        print(f"\n📊 Extracting keys for layer {target_layer}, tokens {start_pos} to {end_pos}...")
-        print(f"   Running forward pass to extract keys from attention layer...")
-        extracted_keys = self._extract_keys_from_forward_pass(
-            generated_ids, target_layer, start_pos, end_pos
-        )
+        # Extract keys from multiple layers using a forward pass
+        print(f"\n📊 Extracting keys for layers {target_layers}, tokens {start_pos} to {end_pos}...")
+        print(f"   Running forward pass to extract keys from attention layers...")
+        
+        # Extract keys for each layer
+        keys_per_layer = {}
+        for layer_idx in target_layers:
+            print(f"   Extracting from layer {layer_idx}...")
+            extracted_keys = self._extract_keys_from_forward_pass(
+                generated_ids, layer_idx, start_pos, end_pos
+            )
+            keys_per_layer[layer_idx] = extracted_keys
         
         return {
             'prompt': prompt,
@@ -263,8 +269,8 @@ class GemmaKeyValueExtractor:
             'prompt_token_count': self.prompt_token_count,
             'total_token_count': len(generated_ids),
             'token_range': (start_pos, end_pos),
-            'target_layer': target_layer,
-            'keys': extracted_keys,
+            'target_layers': target_layers,
+            'keys_per_layer': keys_per_layer,
             'generated_ids': generated_ids
         }
     
@@ -342,91 +348,100 @@ class GemmaKeyValueExtractor:
         return organized_keys
     
     def save_results(self, result: Dict[str, Any], question_data: Dict[str, Any],
-                    prompt_type: str, output_dir: str = "key_values") -> str:
+                    prompt_type: str, output_dir: str = "key_values") -> List[str]:
         """
-        Save key extraction results to JSON file.
+        Save key extraction results to JSON files (one per layer).
         
         Args:
-            result: Inference result dictionary with keys
+            result: Inference result dictionary with keys per layer
             question_data: Original question data from MMLU
             prompt_type: Type of prompt used ('normal', 'correct_hint', 'incorrect_hint')
             output_dir: Directory to save results
             
         Returns:
-            Path to saved file
+            List of paths to saved files
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         start_pos, end_pos = result['token_range']
-        layer_idx = result['target_layer']
-        filename = f"keys_{prompt_type}_layer{layer_idx}_range_{start_pos}_{end_pos}_{timestamp}.json"
+        target_layers = result['target_layers']
+        keys_per_layer = result['keys_per_layer']
         
-        output_file = os.path.join(output_dir, filename)
+        output_files = []
         
-        # Prepare metadata
-        metadata = {
-            'model_name': self.model_name,
-            'analysis_date': datetime.now().isoformat(),
-            'device': self.device,
-            'num_layers': self.model.config.num_hidden_layers,
-            'target_layer': result['target_layer'],
-            'num_attention_heads': self.model.config.num_attention_heads,
-            'num_key_value_heads': self.model.config.num_key_value_heads,
-            'head_dim': self.model.config.hidden_size // self.model.config.num_attention_heads,
-            'hidden_size': self.model.config.hidden_size,
-            'prompt_type': prompt_type,
-            'token_range': result['token_range']
-        }
+        # Save a separate file for each layer
+        for layer_idx in target_layers:
+            filename = f"keys_{prompt_type}_layer{layer_idx}_range_{start_pos}_{end_pos}_{timestamp}.json"
+            output_file = os.path.join(output_dir, filename)
+
+            
+            # Prepare metadata for this layer
+            metadata = {
+                'model_name': self.model_name,
+                'analysis_date': datetime.now().isoformat(),
+                'device': self.device,
+                'num_layers': self.model.config.num_hidden_layers,
+                'target_layer': layer_idx,
+                'num_attention_heads': self.model.config.num_attention_heads,
+                'num_key_value_heads': self.model.config.num_key_value_heads,
+                'head_dim': self.model.config.hidden_size // self.model.config.num_attention_heads,
+                'hidden_size': self.model.config.hidden_size,
+                'prompt_type': prompt_type,
+                'token_range': result['token_range']
+            }
+            
+            # Prepare token info
+            token_info = {
+                'prompt_token_count': result['prompt_token_count'],
+                'total_token_count': result['total_token_count'],
+                'token_range': result['token_range'],
+                'saved_token_count': end_pos - start_pos + 1,
+                'all_tokens': result['all_tokens']
+            }
+            
+            # Generate description
+            description = (
+                f"Attention key values at layer {layer_idx} "
+                f"for tokens in range [{start_pos}, {end_pos}] (inclusive). "
+                f"Keys are organized by token position and KV head. "
+                f"Each key vector has dimension {metadata['head_dim']}. "
+                f"The model uses Grouped-Query Attention (GQA): "
+                f"{metadata['num_attention_heads']} query heads share "
+                f"{metadata['num_key_value_heads']} key-value heads. "
+                f"Each KV head is shared by {metadata['num_attention_heads'] // metadata['num_key_value_heads']} query heads."
+            )
+            
+            # Prepare output data for this layer
+            output_data = {
+                'metadata': metadata,
+                'question_info': {
+                    'question': question_data['question'],
+                    'choices': question_data['choices'],
+                    'correct_answer_idx': question_data['answer'],
+                    'correct_answer_letter': chr(65 + question_data['answer']),
+                    'subject': question_data['subject']
+                },
+                'prompt': result['prompt'],
+                'response': result['response'],
+                'full_text': result['full_text'],
+                'token_info': token_info,
+                'keys': keys_per_layer[layer_idx],
+                'description': description
+            }
+            
+            # Save to file
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(output_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"   💾 Layer {layer_idx} saved to: {filename}")
+            print(f"      File size: {os.path.getsize(output_file) / (1024*1024):.2f} MB")
+            
+            output_files.append(output_file)
         
-        # Prepare token info
-        token_info = {
-            'prompt_token_count': result['prompt_token_count'],
-            'total_token_count': result['total_token_count'],
-            'token_range': result['token_range'],
-            'saved_token_count': end_pos - start_pos + 1,
-            'all_tokens': result['all_tokens']
-        }
-        
-        # Generate description
-        description = (
-            f"Attention key values at layer {layer_idx} "
-            f"for tokens in range [{start_pos}, {end_pos}] (inclusive). "
-            f"Keys are organized by token position and KV head. "
-            f"Each key vector has dimension {metadata['head_dim']}. "
-            f"The model uses Grouped-Query Attention (GQA): "
-            f"{metadata['num_attention_heads']} query heads share "
-            f"{metadata['num_key_value_heads']} key-value heads. "
-            f"Each KV head is shared by {metadata['num_attention_heads'] // metadata['num_key_value_heads']} query heads."
-        )
-        
-        # Prepare output data
-        output_data = {
-            'metadata': metadata,
-            'question_info': {
-                'question': question_data['question'],
-                'choices': question_data['choices'],
-                'correct_answer_idx': question_data['answer'],
-                'correct_answer_letter': chr(65 + question_data['answer']),
-                'subject': question_data['subject']
-            },
-            'prompt': result['prompt'],
-            'response': result['response'],
-            'full_text': result['full_text'],
-            'token_info': token_info,
-            'keys': result['keys'],
-            'description': description
-        }
-        
-        # Save to file
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"\n💾 Results saved to: {output_file}")
-        print(f"   File size: {os.path.getsize(output_file) / (1024*1024):.2f} MB")
-        
-        return output_file
+        print(f"\n✅ Saved {len(output_files)} files total")
+        return output_files
 
 
 def main():
@@ -443,28 +458,34 @@ def main():
             print("GEMMA-2-9B KEY VALUE EXTRACTION")
             print("=" * 80)
             print("\nUsage:")
-            print("  python key_extraction.py <mmlu_path> <question_idx> <prompt_type> <layer> <num_tokens> [max_tokens]")
+            print("  python key_extraction.py <mmlu_path> <question_idx> <prompt_type> <layers> <num_tokens> [max_tokens]")
             print("\nArguments:")
             print("  mmlu_path       Path to MMLU sample dataset JSON file")
             print("  question_idx    Question index (0-based)")
             print("  prompt_type     'normal', 'correct_hint', or 'incorrect_hint'")
-            print("  layer           Layer index to extract keys from (0 to 41 for Gemma-2-9B)")
+            print("  layers          Layer indices to extract keys from:")
+            print("                  - Single layer: '20'")
+            print("                  - Multiple layers (comma-separated): '1,10,20,30,40'")
+            print("                  - Range notation: '10-15' (extracts layers 10,11,12,13,14,15)")
             print("  num_tokens      Number of tokens to capture after prompt ends")
             print("  max_tokens      (optional) Maximum number of tokens to generate [default: 500]")
             print("\nDescription:")
-            print("  Extracts attention key values at a specific layer for N tokens after the prompt.")
-            print("  Keys are captured for all KV heads at the specified layer.")
+            print("  Extracts attention key values at specified layer(s) for N tokens after the prompt.")
+            print("  Keys are captured for all KV heads at each specified layer.")
+            print("  Saves one JSON file per layer for use in activation patching experiments.")
             print("  Note: Gemma-2 uses Grouped-Query Attention (GQA) with 8 KV heads shared by 16 query heads.")
-            print("  Useful for activation patching experiments on attention mechanisms.")
             print("\nExamples:")
             print("  # Extract keys from layer 20 for first 5 tokens after prompt")
             print("  python key_extraction.py mmlu_sample_dataset.json 0 normal 20 5")
             print()
-            print("  # Extract keys from layer 10 for first 10 tokens with incorrect hint")
-            print("  python key_extraction.py mmlu_sample_dataset.json 3 incorrect_hint 10 10")
+            print("  # Extract keys from layers 1,10,20,30,40 simultaneously")
+            print("  python key_extraction.py mmlu_sample_dataset.json 0 normal 1,10,20,30,40 5")
             print()
-            print("  # Extract keys from layer 30 for first 8 tokens, generating up to 600 tokens")
-            print("  python key_extraction.py mmlu_sample_dataset.json 5 correct_hint 30 8 600")
+            print("  # Extract keys from layers 10 through 15 (inclusive)")
+            print("  python key_extraction.py mmlu_sample_dataset.json 0 normal 10-15 5")
+            print()
+            print("  # Extract with longer generation")
+            print("  python key_extraction.py mmlu_sample_dataset.json 3 incorrect_hint 20,25,30 8 600")
             print("=" * 80)
             sys.exit(0)
         
@@ -476,9 +497,37 @@ def main():
         mmlu_path = sys.argv[1]
         question_idx = int(sys.argv[2])
         prompt_type = sys.argv[3]
-        target_layer = int(sys.argv[4])
+        layers_arg = sys.argv[4]
         num_tokens_after_prompt = int(sys.argv[5])
         max_tokens = int(sys.argv[6]) if len(sys.argv) > 6 else 500
+        
+        # Parse layers argument
+        target_layers = []
+        if '-' in layers_arg and layers_arg.count('-') == 1:
+            # Range notation: "10-15"
+            try:
+                start, end = layers_arg.split('-')
+                start_layer = int(start)
+                end_layer = int(end)
+                target_layers = list(range(start_layer, end_layer + 1))
+            except ValueError:
+                print(f"❌ Error: Invalid range format '{layers_arg}'")
+                print("   Range should be like '10-15'")
+                sys.exit(1)
+        elif ',' in layers_arg:
+            # Comma-separated: "1,10,20,30"
+            try:
+                target_layers = [int(x.strip()) for x in layers_arg.split(',')]
+            except ValueError:
+                print(f"❌ Error: Invalid comma-separated layers '{layers_arg}'")
+                sys.exit(1)
+        else:
+            # Single layer: "20"
+            try:
+                target_layers = [int(layers_arg)]
+            except ValueError:
+                print(f"❌ Error: Invalid layer number '{layers_arg}'")
+                sys.exit(1)
     else:
         print("❌ Error: No arguments provided")
         print("Run 'python key_extraction.py --help' for usage information")
@@ -492,7 +541,8 @@ def main():
         print(f"Configuration:")
         print(f"  Question index: {question_idx}")
         print(f"  Prompt type: {prompt_type}")
-        print(f"  Target layer: {target_layer}")
+        print(f"  Target layers: {target_layers}")
+        print(f"  Number of layers: {len(target_layers)}")
         print(f"  Tokens to capture: {num_tokens_after_prompt}")
         print(f"  Max tokens to generate: {max_tokens}")
         
@@ -543,17 +593,19 @@ def main():
         print(f"\n📍 Calculated token range: [{start_pos}, {end_pos}]")
         print(f"   These keys will be used to predict tokens at positions {start_pos+1} to {end_pos+1}")
         
-        # Validate layer index
+        # Validate layer indices
         extractor.load_model()
         
-        if target_layer < 0 or target_layer >= extractor.model.config.num_hidden_layers:
-            print(f"❌ Error: Layer index {target_layer} out of range (0-{extractor.model.config.num_hidden_layers-1})")
+        max_layer = extractor.model.config.num_hidden_layers - 1
+        invalid_layers = [l for l in target_layers if l < 0 or l > max_layer]
+        if invalid_layers:
+            print(f"❌ Error: Layer indices {invalid_layers} out of range (0-{max_layer})")
             sys.exit(1)
         
-        # Run inference and capture keys
+        # Run inference and capture keys from all layers
         result = extractor.run_inference_and_capture_keys(
             prompt,
-            target_layer,
+            target_layers,
             token_range=(start_pos, end_pos),
             max_new_tokens=max_tokens
         )
@@ -564,30 +616,34 @@ def main():
         print(result['response'])
         print("\n" + "=" * 80)
         
-        # Save results
+        # Save results (one file per layer)
         print("\n" + "=" * 80)
         print("SAVING RESULTS")
         print("=" * 80)
         
-        output_file = extractor.save_results(result, question_data, prompt_type)
+        output_files = extractor.save_results(result, question_data, prompt_type)
         
         print("\n" + "=" * 80)
         print("✅ EXTRACTION COMPLETE!")
         print("=" * 80)
-        print(f"Results saved to: {output_file}")
+        print(f"Extracted keys from {len(target_layers)} layer(s): {target_layers}")
+        print(f"Saved {len(output_files)} file(s) to key_values/")
         print(f"\nSummary:")
         print(f"  - Question: {question_data['question'][:60]}...")
         print(f"  - Prompt type: {prompt_type}")
-        print(f"  - Target layer: {target_layer}")
+        print(f"  - Target layers: {target_layers}")
         print(f"  - Prompt length: {prompt_length} tokens")
         print(f"  - Total tokens generated: {result['total_token_count']}")
         print(f"  - Token range captured: [{start_pos}, {end_pos}]")
-        print(f"  - Tokens saved: {num_tokens_after_prompt}")
+        print(f"  - Tokens saved per layer: {num_tokens_after_prompt}")
         print(f"  - Architecture: Grouped-Query Attention (GQA)")
         print(f"    • Query heads: {extractor.model.config.num_attention_heads}")
         print(f"    • KV heads captured: {extractor.model.config.num_key_value_heads}")
         print(f"    • Head dimension: {extractor.model.config.hidden_size // extractor.model.config.num_attention_heads}")
         print(f"    • Sharing ratio: {extractor.model.config.num_attention_heads // extractor.model.config.num_key_value_heads} query heads per KV head")
+        print("\nFiles saved:")
+        for i, filepath in enumerate(output_files, 1):
+            print(f"  {i}. {os.path.basename(filepath)}")
         print("=" * 80)
         
     except KeyboardInterrupt:
