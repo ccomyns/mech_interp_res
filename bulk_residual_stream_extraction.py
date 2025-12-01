@@ -469,20 +469,23 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
                 'prompt': result['prompt'],
                 'raw_response': result['response'],
                 'full_text': result['full_text'],
-                'mentioned_A': mention_counts['mentioned_A'],
-                'mentioned_B': mention_counts['mentioned_B'],
-                'mentioned_C': mention_counts['mentioned_C'],
-                'mentioned_D': mention_counts['mentioned_D'],
-                'needs_review': mention_counts['needs_review'],
-                'prompt_token_count': result['prompt_token_count'],
-                'total_token_count': result['total_token_count'],
-                'token_range': result['token_range'],
-                'all_tokens': result['all_tokens'],
-                'residual_stream_hidden_states': result['hidden_states']
             }
             
-            if hint_letter:
-                question_result['hint_letter'] = hint_letter
+            # Add incorrect_hint field only for incorrect_hint prompt type
+            if prompt_type == "incorrect_hint" and hint_letter:
+                question_result['incorrect_hint'] = hint_letter
+            
+            # Add mention counts and other fields
+            question_result['mentioned_A'] = mention_counts['mentioned_A']
+            question_result['mentioned_B'] = mention_counts['mentioned_B']
+            question_result['mentioned_C'] = mention_counts['mentioned_C']
+            question_result['mentioned_D'] = mention_counts['mentioned_D']
+            question_result['needs_review'] = mention_counts['needs_review']
+            question_result['prompt_token_count'] = result['prompt_token_count']
+            question_result['total_token_count'] = result['total_token_count']
+            question_result['token_range'] = result['token_range']
+            question_result['all_tokens'] = result['all_tokens']
+            question_result['residual_stream_hidden_states'] = result['hidden_states']
             
             # Print mention summary
             print(f"   Mentions - A:{mention_counts['mentioned_A']} B:{mention_counts['mentioned_B']} C:{mention_counts['mentioned_C']} D:{mention_counts['mentioned_D']} | needs_review:{mention_counts['needs_review']}")
