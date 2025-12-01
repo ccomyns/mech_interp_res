@@ -36,7 +36,7 @@ import argparse
 class GemmaResidualStreamAnalyzer:
     """Analyzer for extracting residual stream hidden states from Gemma-3-4B."""
     
-    def __init__(self, model_name: str = "google/gemma-3-4b-it", device: str = "auto"):
+    def __init__(self, model_name: str = "google/gemma-3-4b-it", device: str = "cpu"):
         """
         Initialize the Gemma-3-4B residual stream analyzer.
         
@@ -204,7 +204,7 @@ class GemmaResidualStreamAnalyzer:
         return prompt, incorrect_letter
     
     def run_inference_with_hidden_states_for_range(self, prompt: str, token_range: Tuple[int, int],
-                                                   max_new_tokens: int = 500) -> Dict[str, Any]:
+                                                   max_new_tokens: int = 8000) -> Dict[str, Any]:
         """
         Run inference while capturing hidden states for a specific token range.
         
@@ -282,15 +282,15 @@ class GemmaResidualStreamAnalyzer:
                                         total_tokens: int) -> Dict[str, Any]:
         """Extract hidden states from the generation output for a specific token range.
         
-        Only captures layers 1 and 15:
+        Only captures layers 1 and 18:
         - Layer 1: First transformer layer output (after first residual block)
-        - Layer 15: Midpoint layer (middle of the 30-layer Gemma-3-4B model)
+        - Layer 18: Midpoint layer (middle of the 34-layer Gemma-3-4B model)
         """
         if not hasattr(outputs, 'hidden_states') or outputs.hidden_states is None:
             raise ValueError("No hidden states available in output")
         
-        # Only capture layer 1 (first transformer) and layer 15 (midpoint)
-        layers_to_capture = [1, 15]
+        # Only capture layer 1 (first transformer) and layer 18 (midpoint)
+        layers_to_capture = [1, 18]
         
         # Initialize storage for hidden states (only for specified layers)
         layer_hidden_states = {f"layer_{i}": {} for i in layers_to_capture}
@@ -322,6 +322,43 @@ class GemmaResidualStreamAnalyzer:
                             layer_hidden_states[layer_key][global_pos] = hidden_vector.tolist()
         
         return layer_hidden_states
+
+
+def count_option_mentions(response: str, choices: list) -> dict:
+    """
+    Count how many times each answer option is mentioned in the response.
+    
+    Args:
+        response: The model's raw response text
+        choices: List of choice texts (e.g., ["True, True", "False, False", ...])
+        
+    Returns:
+        Dictionary with mentioned_A, mentioned_B, mentioned_C, mentioned_D counts
+        and needs_review flag
+    """
+    counts = {}
+    letters = ['A', 'B', 'C', 'D']
+    
+    for i, choice in enumerate(choices):
+        if i < len(letters):
+            letter = letters[i]
+            # Count occurrences of "A. <choice text>" pattern
+            pattern = f"{letter}. {choice}"
+            count = response.count(pattern)
+            counts[f"mentioned_{letter}"] = count
+    
+    # Fill in any missing letters with 0 (in case there are fewer than 4 choices)
+    for letter in letters:
+        if f"mentioned_{letter}" not in counts:
+            counts[f"mentioned_{letter}"] = 0
+    
+    # Determine if needs_review
+    non_zero_counts = sum(1 for letter in letters if counts.get(f"mentioned_{letter}", 0) > 0)
+    
+    # needs_review is True if all counts are 0 OR if multiple options have non-zero counts
+    counts["needs_review"] = (non_zero_counts == 0) or (non_zero_counts > 1)
+    
+    return counts
 
 
 def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
@@ -410,11 +447,14 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
             result = analyzer.run_inference_with_hidden_states_for_range(
                 prompt,
                 token_range=(start_pos, end_pos),
-                max_new_tokens=500
+                max_new_tokens=8000
             )
             
             print(f"✅ Generated {result['total_token_count'] - result['prompt_token_count']} tokens")
             print(f"Response preview: {result['response'][:100]}...")
+            
+            # Count option mentions in the response
+            mention_counts = count_option_mentions(result['response'], question_data['choices'])
             
             # Store result for this question
             question_result = {
@@ -429,6 +469,11 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
                 'prompt': result['prompt'],
                 'raw_response': result['response'],
                 'full_text': result['full_text'],
+                'mentioned_A': mention_counts['mentioned_A'],
+                'mentioned_B': mention_counts['mentioned_B'],
+                'mentioned_C': mention_counts['mentioned_C'],
+                'mentioned_D': mention_counts['mentioned_D'],
+                'needs_review': mention_counts['needs_review'],
                 'prompt_token_count': result['prompt_token_count'],
                 'total_token_count': result['total_token_count'],
                 'token_range': result['token_range'],
@@ -438,6 +483,9 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
             
             if hint_letter:
                 question_result['hint_letter'] = hint_letter
+            
+            # Print mention summary
+            print(f"   Mentions - A:{mention_counts['mentioned_A']} B:{mention_counts['mentioned_B']} C:{mention_counts['mentioned_C']} D:{mention_counts['mentioned_D']} | needs_review:{mention_counts['needs_review']}")
             
             results.append(question_result)
             
@@ -479,7 +527,7 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
             f"and layer_15 (midpoint layer) for {num_tokens_after_prompt} tokens after the prompt ends. "
             f"Each result includes the raw model response and the residual stream values."
         ),
-        'layers_captured': [1, 15],
+        'layers_captured': [1, 18],
         'results': results
     }
     
@@ -505,8 +553,8 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
     print(f"  - Failed: {failed}")
     print(f"  - Prompt type: {prompt_type}")
     print(f"  - Tokens captured per question: {num_tokens_after_prompt}")
-    print(f"  - Layers captured: 1 (first transformer), 15 (midpoint)")
-    print(f"  - Hidden size: {analyzer.model.config.hidden_size}")
+    print(f"  - Layers captured: 1 (first transformer), 18 (midpoint)")
+    print(f"  - Hidden size: {analyzer._hidden_size}")
     print("=" * 80)
     
     return output_file
