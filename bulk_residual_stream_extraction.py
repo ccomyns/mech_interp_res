@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bulk Residual Stream Extraction for Gemma-2-9B
+Bulk Residual Stream Extraction for Gemma-3-4B
 
 This script processes multiple MMLU questions in bulk and extracts residual stream
 hidden states for each. Results are saved to a single JSON file containing:
@@ -34,11 +34,11 @@ import argparse
 
 
 class GemmaResidualStreamAnalyzer:
-    """Analyzer for extracting residual stream hidden states from Gemma-2-9B."""
+    """Analyzer for extracting residual stream hidden states from Gemma-3-4B."""
     
-    def __init__(self, model_name: str = "google/gemma-2-9b-it", device: str = "auto"):
+    def __init__(self, model_name: str = "google/gemma-3-4b-it", device: str = "auto"):
         """
-        Initialize the Gemma-2-9B residual stream analyzer.
+        Initialize the Gemma-3-4B residual stream analyzer.
         
         Args:
             model_name: HuggingFace model identifier
@@ -49,6 +49,26 @@ class GemmaResidualStreamAnalyzer:
         self.tokenizer = None
         self.model = None
         self.prompt_token_count = 0
+        self._num_layers = None
+        self._hidden_size = None
+    
+    def _get_config_attr(self, config, attr_names: list, default=None):
+        """
+        Get a config attribute, trying multiple possible names.
+        Gemma 3 may use text_config for text-specific attributes.
+        """
+        # First try the main config
+        for name in attr_names:
+            if hasattr(config, name):
+                return getattr(config, name)
+        
+        # For Gemma 3 multimodal, try text_config
+        if hasattr(config, 'text_config'):
+            for name in attr_names:
+                if hasattr(config.text_config, name):
+                    return getattr(config.text_config, name)
+        
+        return default
         
     def _setup_device(self, device: str) -> str:
         """Setup the appropriate device for inference."""
@@ -60,7 +80,7 @@ class GemmaResidualStreamAnalyzer:
         return device
     
     def load_model(self):
-        """Load the Gemma-2-9B model and tokenizer with hidden states output enabled."""
+        """Load the Gemma-3-4B model and tokenizer with hidden states output enabled."""
         print(f"Loading {self.model_name} on {self.device}...")
         print("This may take a few minutes...")
         
@@ -86,8 +106,17 @@ class GemmaResidualStreamAnalyzer:
                 ).to(self.device)
             
             print(f"✅ Model loaded successfully on {self.device}")
-            print(f"Model has {self.model.config.num_hidden_layers} transformer layers + 1 embedding layer")
-            print(f"Hidden size: {self.model.config.hidden_size}")
+            # Get num_layers and hidden_size (Gemma 3 uses different attribute names and may nest under text_config)
+            self._num_layers = self._get_config_attr(
+                self.model.config, 
+                ['num_hidden_layers', 'num_layers', 'n_layer', 'n_layers']
+            )
+            self._hidden_size = self._get_config_attr(
+                self.model.config,
+                ['hidden_size', 'hidden_dim', 'd_model', 'model_dim']
+            )
+            print(f"Model has {self._num_layers} transformer layers + 1 embedding layer")
+            print(f"Hidden size: {self._hidden_size}")
             
         except Exception as e:
             print(f"❌ Error loading model: {e}")
@@ -251,14 +280,20 @@ class GemmaResidualStreamAnalyzer:
     
     def _extract_hidden_states_for_range(self, outputs, start_position: int, end_position: int,
                                         total_tokens: int) -> Dict[str, Any]:
-        """Extract hidden states from the generation output for a specific token range."""
+        """Extract hidden states from the generation output for a specific token range.
+        
+        Only captures layers 1 and 15:
+        - Layer 1: First transformer layer output (after first residual block)
+        - Layer 15: Midpoint layer (middle of the 30-layer Gemma-3-4B model)
+        """
         if not hasattr(outputs, 'hidden_states') or outputs.hidden_states is None:
             raise ValueError("No hidden states available in output")
         
-        num_layers = self.model.config.num_hidden_layers
+        # Only capture layer 1 (first transformer) and layer 15 (midpoint)
+        layers_to_capture = [1, 15]
         
-        # Initialize storage for hidden states
-        layer_hidden_states = {f"layer_{i}": {} for i in range(num_layers + 1)}
+        # Initialize storage for hidden states (only for specified layers)
+        layer_hidden_states = {f"layer_{i}": {} for i in layers_to_capture}
         
         prompt_len = self.prompt_token_count
         first_token_in_step_0 = False
@@ -275,7 +310,8 @@ class GemmaResidualStreamAnalyzer:
                 else:
                     token_positions = [prompt_len + step_idx - 1]
             
-            for layer_idx in range(0, num_layers + 1):
+            # Only iterate over the layers we want to capture
+            for layer_idx in layers_to_capture:
                 layer_hidden = step_hidden_states[layer_idx]
                 
                 for local_idx, global_pos in enumerate(token_positions):
@@ -426,8 +462,8 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
             'model_name': analyzer.model_name,
             'analysis_date': datetime.now().isoformat(),
             'device': analyzer.device,
-            'num_layers': analyzer.model.config.num_hidden_layers,
-            'hidden_size': analyzer.model.config.hidden_size,
+            'num_layers': analyzer._num_layers,
+            'hidden_size': analyzer._hidden_size,
             'prompt_type': prompt_type,
             'question_range': {
                 'start_idx': start_idx,
@@ -439,11 +475,11 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
         },
         'description': (
             f"Bulk extraction of residual stream hidden states for questions {start_idx} to {end_idx-1}. "
-            f"For each question, hidden states at the embedding layer (layer_0) and at the end of each "
-            f"transformer layer (layer_1 to layer_{analyzer.model.config.num_hidden_layers}) are captured "
-            f"for {num_tokens_after_prompt} tokens after the prompt ends. Each result includes the raw model "
-            f"response and the residual stream values."
+            f"For each question, hidden states are captured at layer_1 (first transformer layer output) "
+            f"and layer_15 (midpoint layer) for {num_tokens_after_prompt} tokens after the prompt ends. "
+            f"Each result includes the raw model response and the residual stream values."
         ),
+        'layers_captured': [1, 15],
         'results': results
     }
     
@@ -469,7 +505,7 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
     print(f"  - Failed: {failed}")
     print(f"  - Prompt type: {prompt_type}")
     print(f"  - Tokens captured per question: {num_tokens_after_prompt}")
-    print(f"  - Layers: {analyzer.model.config.num_hidden_layers + 1}")
+    print(f"  - Layers captured: 1 (first transformer), 15 (midpoint)")
     print(f"  - Hidden size: {analyzer.model.config.hidden_size}")
     print("=" * 80)
     
@@ -478,7 +514,7 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bulk residual stream extraction for Gemma-2-9B",
+        description="Bulk residual stream extraction for Gemma-3-4B",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

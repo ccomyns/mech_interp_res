@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Residual Stream Analysis Tool for Gemma-2-9B
+Residual Stream Analysis Tool for Gemma-3-4B
 
-This script analyzes the hidden states saved by Gemma_2_9B_residual_stream.py.
+This script analyzes the hidden states saved by bulk_residual_stream_extraction.py.
 It performs:
 1. Loading saved residual stream data
 2. Normalization of hidden states (final layer norm)
@@ -21,9 +21,9 @@ from pathlib import Path
 
 
 class ResidualStreamAnalyzer:
-    def __init__(self, model_name: str = "google/gemma-2-9b-it", device: str = "auto"):
+    def __init__(self, model_name: str = "google/gemma-3-4b-it", device: str = "auto"):
         """
-        Initialize the residual stream analyzer.
+        Initialize the residual stream analyzer for Gemma-3-4B.
         
         Args:
             model_name: HuggingFace model identifier
@@ -34,6 +34,26 @@ class ResidualStreamAnalyzer:
         self.tokenizer = None
         self.model = None
         self.loaded_data = None
+        self._num_layers = None
+        self._hidden_size = None
+    
+    def _get_config_attr(self, config, attr_names: list, default=None):
+        """
+        Get a config attribute, trying multiple possible names.
+        Gemma 3 may use text_config for text-specific attributes.
+        """
+        # First try the main config
+        for name in attr_names:
+            if hasattr(config, name):
+                return getattr(config, name)
+        
+        # For Gemma 3 multimodal, try text_config
+        if hasattr(config, 'text_config'):
+            for name in attr_names:
+                if hasattr(config.text_config, name):
+                    return getattr(config.text_config, name)
+        
+        return default
         
     def _setup_device(self, device: str) -> str:
         """Setup the appropriate device."""
@@ -46,7 +66,7 @@ class ResidualStreamAnalyzer:
     
     def load_model(self):
         """
-        Load the Gemma-2-9B model and tokenizer.
+        Load the Gemma-3-4B model and tokenizer.
         We need access to model.model.norm (final layer norm) and model.lm_head (unembedding).
         """
         print(f"Loading {self.model_name} on {self.device}...")
@@ -74,9 +94,22 @@ class ResidualStreamAnalyzer:
             self.model.eval()  # Set to evaluation mode
             
             print(f"✅ Model loaded successfully on {self.device}")
-            print(f"   Vocabulary size: {self.model.config.vocab_size}")
-            print(f"   Hidden size: {self.model.config.hidden_size}")
-            print(f"   Number of layers: {self.model.config.num_hidden_layers}")
+            # Get config attributes (Gemma 3 uses different names and may nest under text_config)
+            self._num_layers = self._get_config_attr(
+                self.model.config,
+                ['num_hidden_layers', 'num_layers', 'n_layer', 'n_layers']
+            )
+            self._hidden_size = self._get_config_attr(
+                self.model.config,
+                ['hidden_size', 'hidden_dim', 'd_model', 'model_dim']
+            )
+            vocab_size = self._get_config_attr(
+                self.model.config,
+                ['vocab_size']
+            )
+            print(f"   Vocabulary size: {vocab_size}")
+            print(f"   Hidden size: {self._hidden_size}")
+            print(f"   Number of layers: {self._num_layers}")
             
             # Verify we have access to the necessary components
             if hasattr(self.model, 'model') and hasattr(self.model.model, 'norm'):
@@ -169,7 +202,7 @@ class ResidualStreamAnalyzer:
             hidden_state = hidden_state.unsqueeze(0)  # [1, hidden_size]
         
         # Apply final layer normalization
-        # For Gemma-2, this is model.model.norm
+        # For Gemma-3, this is model.model.norm
         with torch.no_grad():
             normalized = self.model.model.norm(hidden_state)
             

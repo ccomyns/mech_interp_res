@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gemma-2-9B Residual Stream Analysis for Chain-of-Thought
+Gemma-3-4B Residual Stream Analysis for Chain-of-Thought
 
 This script captures residual stream logits (hidden states) at the embedding layer and 
 at the end of every transformer layer for CoT tokens (tokens generated after the prompt). 
@@ -30,9 +30,9 @@ import numpy as np
 
 
 class GemmaResidualStreamAnalyzer:
-    def __init__(self, model_name: str = "google/gemma-2-9b-it", device: str = "auto"):
+    def __init__(self, model_name: str = "google/gemma-3-4b-it", device: str = "auto"):
         """
-        Initialize the Gemma-2-9B residual stream analyzer.
+        Initialize the Gemma-3-4B residual stream analyzer.
         
         Args:
             model_name: HuggingFace model identifier
@@ -47,6 +47,26 @@ class GemmaResidualStreamAnalyzer:
         self.last_hidden_states = None
         self.all_tokens = None
         self.prompt_token_count = 0
+        self._num_layers = None
+        self._hidden_size = None
+    
+    def _get_config_attr(self, config, attr_names: list, default=None):
+        """
+        Get a config attribute, trying multiple possible names.
+        Gemma 3 may use text_config for text-specific attributes.
+        """
+        # First try the main config
+        for name in attr_names:
+            if hasattr(config, name):
+                return getattr(config, name)
+        
+        # For Gemma 3 multimodal, try text_config
+        if hasattr(config, 'text_config'):
+            for name in attr_names:
+                if hasattr(config.text_config, name):
+                    return getattr(config.text_config, name)
+        
+        return default
         
     def _setup_device(self, device: str) -> str:
         """Setup the appropriate device for inference."""
@@ -58,7 +78,7 @@ class GemmaResidualStreamAnalyzer:
         return device
     
     def load_model(self):
-        """Load the Gemma-2-9B model and tokenizer with hidden states output enabled."""
+        """Load the Gemma-3-4B model and tokenizer with hidden states output enabled."""
         print(f"Loading {self.model_name} on {self.device}...")
         print("This may take a few minutes...")
         
@@ -84,8 +104,17 @@ class GemmaResidualStreamAnalyzer:
                 ).to(self.device)
             
             print(f"✅ Model loaded successfully on {self.device}")
-            print(f"Model has {self.model.config.num_hidden_layers} transformer layers + 1 embedding layer")
-            print(f"Hidden size: {self.model.config.hidden_size}")
+            # Get config attributes (Gemma 3 uses different names and may nest under text_config)
+            self._num_layers = self._get_config_attr(
+                self.model.config,
+                ['num_hidden_layers', 'num_layers', 'n_layer', 'n_layers']
+            )
+            self._hidden_size = self._get_config_attr(
+                self.model.config,
+                ['hidden_size', 'hidden_dim', 'd_model', 'model_dim']
+            )
+            print(f"Model has {self._num_layers} transformer layers + 1 embedding layer")
+            print(f"Hidden size: {self._hidden_size}")
             
         except Exception as e:
             print(f"❌ Error loading model: {e}")
@@ -463,8 +492,8 @@ class GemmaResidualStreamAnalyzer:
         if not hasattr(outputs, 'hidden_states') or outputs.hidden_states is None:
             raise ValueError("No hidden states available in output")
         
-        num_layers = self.model.config.num_hidden_layers
-        hidden_size = self.model.config.hidden_size
+        num_layers = self._num_layers
+        hidden_size = self._hidden_size
         
         # Initialize storage for hidden states
         # We'll store per layer: {layer_idx: {token_pos: hidden_vector}}
@@ -539,8 +568,8 @@ class GemmaResidualStreamAnalyzer:
         if not hasattr(outputs, 'hidden_states') or outputs.hidden_states is None:
             raise ValueError("No hidden states available in output")
         
-        num_layers = self.model.config.num_hidden_layers
-        hidden_size = self.model.config.hidden_size
+        num_layers = self._num_layers
+        hidden_size = self._hidden_size
         
         # Initialize storage for hidden states
         # Include embedding layer (layer_0) and all transformer layers (layer_1 to layer_N)
@@ -630,8 +659,8 @@ class GemmaResidualStreamAnalyzer:
             'model_name': self.model_name,
             'analysis_date': datetime.now().isoformat(),
             'device': self.device,
-            'num_layers': self.model.config.num_hidden_layers,
-            'hidden_size': self.model.config.hidden_size,
+            'num_layers': self._num_layers,
+            'hidden_size': self._hidden_size,
             'prompt_type': prompt_type,
             'mode': mode
         }
@@ -661,20 +690,20 @@ class GemmaResidualStreamAnalyzer:
         if mode == 'range':
             start_pos, end_pos = result['token_range']
             description = (
-                f"Hidden states (residual stream values) at the embedding layer (layer_0) "
-                f"and at the end of each transformer layer (layer_1 to layer_{self.model.config.num_hidden_layers}) "
-                f"for tokens in range [{start_pos}, {end_pos}] (inclusive). "
-                f"Each layer contains a mapping from token position to hidden state vector "
-                f"of size {self.model.config.hidden_size}."
-            )
+            f"Hidden states (residual stream values) at the embedding layer (layer_0) "
+            f"and at the end of each transformer layer (layer_1 to layer_{self._num_layers}) "
+            f"for tokens in range [{start_pos}, {end_pos}] (inclusive). "
+            f"Each layer contains a mapping from token position to hidden state vector "
+            f"of size {self._hidden_size}."
+        )
         else:
             description = (
-                f"Hidden states (residual stream values) at the embedding layer (layer_0) "
-                f"and at the end of each transformer layer (layer_1 to layer_{self.model.config.num_hidden_layers}) "
-                f"for tokens after position {result['cutoff_position']}. "
-                f"Each layer contains a mapping from token position to hidden state vector "
-                f"of size {self.model.config.hidden_size}."
-            )
+            f"Hidden states (residual stream values) at the embedding layer (layer_0) "
+            f"and at the end of each transformer layer (layer_1 to layer_{self._num_layers}) "
+            f"for tokens after position {result['cutoff_position']}. "
+            f"Each layer contains a mapping from token position to hidden state vector "
+            f"of size {self._hidden_size}."
+        )
         
         # Prepare output data
         output_data = {
@@ -716,7 +745,7 @@ def run_interactive_analysis(mmlu_json_path: str, question_idx: int,
         max_new_tokens: Maximum tokens to generate
     """
     print("=" * 80)
-    print("GEMMA-2-9B RESIDUAL STREAM ANALYSIS")
+    print("GEMMA-3-4B RESIDUAL STREAM ANALYSIS")
     print("=" * 80)
     
     # Initialize analyzer
@@ -829,8 +858,8 @@ def run_interactive_analysis(mmlu_json_path: str, question_idx: int,
     print(f"  - Prompt type: {prompt_type}")
     print(f"  - Total tokens: {result['total_token_count']}")
     print(f"  - CoT tokens (saved): {result['total_token_count'] - cutoff_position - 1}")
-    print(f"  - Layers: {analyzer.model.config.num_hidden_layers + 1} (1 embedding + {analyzer.model.config.num_hidden_layers} transformer)")
-    print(f"  - Hidden size: {analyzer.model.config.hidden_size}")
+    print(f"  - Layers: {analyzer._num_layers + 1} (1 embedding + {analyzer._num_layers} transformer)")
+    print(f"  - Hidden size: {analyzer._hidden_size}")
     print("=" * 80)
     
     return analyzer, result, output_file
@@ -856,7 +885,7 @@ def run_analysis_with_token_range(mmlu_json_path: str, question_idx: int,
         Tuple of (analyzer, result, output_file)
     """
     print("=" * 80)
-    print("GEMMA-2-9B RESIDUAL STREAM ANALYSIS (TOKEN RANGE MODE)")
+    print("GEMMA-3-4B RESIDUAL STREAM ANALYSIS (TOKEN RANGE MODE)")
     print("=" * 80)
     
     # Initialize analyzer
@@ -941,8 +970,8 @@ def run_analysis_with_token_range(mmlu_json_path: str, question_idx: int,
     print(f"  - Total tokens: {result['total_token_count']}")
     print(f"  - Token range: [{start_pos}, {end_pos}]")
     print(f"  - Tokens saved: {end_pos - start_pos + 1}")
-    print(f"  - Layers: {analyzer.model.config.num_hidden_layers + 1} (1 embedding + {analyzer.model.config.num_hidden_layers} transformer)")
-    print(f"  - Hidden size: {analyzer.model.config.hidden_size}")
+    print(f"  - Layers: {analyzer._num_layers + 1} (1 embedding + {analyzer._num_layers} transformer)")
+    print(f"  - Hidden size: {analyzer._hidden_size}")
     print("=" * 80)
     
     return analyzer, result, output_file
@@ -970,7 +999,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] in ["--help", "-h"]:
             print("\n" + "=" * 80)
-            print("GEMMA-2-9B RESIDUAL STREAM EXTRACTION")
+            print("GEMMA-3-4B RESIDUAL STREAM EXTRACTION")
             print("=" * 80)
             print("\nUsage:")
             print("  python residual_stream_extraction.py <mmlu_path> <question_idx> <prompt_type> <max_tokens> [num_tokens_after_prompt]")
@@ -1106,8 +1135,8 @@ if __name__ == "__main__":
             print(f"  - Total tokens generated: {result['total_token_count']}")
             print(f"  - Token range captured: [{start_pos}, {end_pos}]")
             print(f"  - Tokens saved: {num_tokens_after_prompt}")
-            print(f"  - Layers: {analyzer.model.config.num_hidden_layers + 1} (1 embedding + {analyzer.model.config.num_hidden_layers} transformer)")
-            print(f"  - Hidden size: {analyzer.model.config.hidden_size}")
+            print(f"  - Layers: {analyzer._num_layers + 1} (1 embedding + {analyzer._num_layers} transformer)")
+            print(f"  - Hidden size: {analyzer._hidden_size}")
             print("=" * 80)
             
         else:
