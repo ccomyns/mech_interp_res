@@ -204,7 +204,7 @@ class GemmaResidualStreamAnalyzer:
         return prompt, incorrect_letter
     
     def run_inference_with_hidden_states_for_range(self, prompt: str, token_range: Tuple[int, int],
-                                                   max_new_tokens: int = 8000) -> Dict[str, Any]:
+                                                   max_new_tokens: int = 1500) -> Dict[str, Any]:
         """
         Run inference while capturing hidden states for a specific token range.
         
@@ -227,7 +227,7 @@ class GemmaResidualStreamAnalyzer:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
+                do_sample=False,
                 temperature=0.1,
                 top_p=0.9,
                 pad_token_id=self.tokenizer.eos_token_id,
@@ -447,7 +447,7 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
             result = analyzer.run_inference_with_hidden_states_for_range(
                 prompt,
                 token_range=(start_pos, end_pos),
-                max_new_tokens=8000
+                max_new_tokens=1500
             )
             
             print(f"✅ Generated {result['total_token_count'] - result['prompt_token_count']} tokens")
@@ -481,6 +481,12 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
             question_result['mentioned_C'] = mention_counts['mentioned_C']
             question_result['mentioned_D'] = mention_counts['mentioned_D']
             question_result['needs_review'] = mention_counts['needs_review']
+            
+            # Check if token budget was exceeded (generated tokens == max_new_tokens)
+            generated_tokens = result['total_token_count'] - result['prompt_token_count']
+            exceeded_budget = generated_tokens >= 1500
+            question_result['exceeded_token_budget'] = exceeded_budget
+            
             question_result['prompt_token_count'] = result['prompt_token_count']
             question_result['total_token_count'] = result['total_token_count']
             question_result['token_range'] = result['token_range']
@@ -489,6 +495,8 @@ def run_bulk_extraction(mmlu_path: str, start_idx: int, end_idx: int,
             
             # Print mention summary
             print(f"   Mentions - A:{mention_counts['mentioned_A']} B:{mention_counts['mentioned_B']} C:{mention_counts['mentioned_C']} D:{mention_counts['mentioned_D']} | needs_review:{mention_counts['needs_review']}")
+            if exceeded_budget:
+                print(f"   ⚠️  Token budget exceeded ({generated_tokens} tokens generated)")
             
             results.append(question_result)
             
