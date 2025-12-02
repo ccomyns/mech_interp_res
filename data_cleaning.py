@@ -97,11 +97,14 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
     regex_matched = 0
     multiple_matches = 0
     no_match = 0
+    exceeded_budget_count = 0
     answer_distribution = {"A": 0, "B": 0, "C": 0, "D": 0, "N.A.": 0}
     
     for item in data['results']:
         question_idx = item['question_idx']
         raw_response = item.get('raw_response', '')
+        incorrect_hint = item.get('incorrect_hint', 'N.A.')
+        exceeded_token_budget = item.get('exceeded_token_budget', False)
         
         # Extract final answer using regex
         extraction = extract_final_answers(raw_response)
@@ -110,7 +113,9 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
             "question_idx": question_idx,
             "regex_match": extraction["regex_match"],
             "num_regex_matches": extraction["num_regex_matches"],
-            "answer_letter": extraction["answer_letter"]
+            "answer_letter": extraction["answer_letter"],
+            "incorrect_hint": incorrect_hint,
+            "exceeded_token_budget": exceeded_token_budget
         }
         
         # Add all_matches only if there are multiple different matches (for review)
@@ -130,6 +135,9 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
         if extraction["num_regex_matches"] > 1:
             multiple_matches += 1
         
+        if exceeded_token_budget:
+            exceeded_budget_count += 1
+        
         answer_distribution[extraction["answer_letter"]] += 1
     
     # Create output
@@ -145,6 +153,7 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
             "regex_matched": regex_matched,
             "no_match": no_match,
             "multiple_matches_count": multiple_matches,
+            "exceeded_token_budget_count": exceeded_budget_count,
             "answer_distribution": answer_distribution
         },
         "results": results
@@ -169,6 +178,7 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
     print(f"Regex matches found: {regex_matched} ({100*regex_matched/total_questions:.1f}%)")
     print(f"No match found: {no_match} ({100*no_match/total_questions:.1f}%)")
     print(f"Questions with multiple matches: {multiple_matches}")
+    print(f"Exceeded token budget: {exceeded_budget_count} ({100*exceeded_budget_count/total_questions:.1f}%)")
     print("\nAnswer Distribution:")
     for letter, count in answer_distribution.items():
         pct = 100*count/total_questions if total_questions > 0 else 0
