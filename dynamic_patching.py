@@ -72,6 +72,45 @@ class DynamicActivationPatcher:
         print(f"Model loaded successfully on {self.device}")
         print(f"Number of layers: {self._num_layers}")
         print(f"Hidden size: {self._hidden_size}")
+        
+        # Find the layers module (different for different model architectures)
+        self._layers_module = self._find_layers_module()
+        print(f"Layers module found: {type(self._layers_module).__name__}")
+    
+    def _find_layers_module(self):
+        """
+        Find the transformer layers module in the model.
+        Different model architectures store layers in different places.
+        """
+        # Try different possible paths for transformer layers
+        possible_paths = [
+            ('model.model.layers', lambda: self.model.model.layers),  # Gemma 2, Llama, etc.
+            ('model.model.language_model.layers', lambda: self.model.model.language_model.layers),  # Gemma 3 multimodal
+            ('model.model.text_model.layers', lambda: self.model.model.text_model.layers),  # Some multimodal
+            ('model.language_model.model.layers', lambda: self.model.language_model.model.layers),  # Another pattern
+            ('model.text_model.layers', lambda: self.model.text_model.layers),  # Another multimodal pattern
+            ('model.transformer.h', lambda: self.model.transformer.h),  # GPT-2 style
+            ('model.model.decoder.layers', lambda: self.model.model.decoder.layers),  # Encoder-decoder
+        ]
+        
+        for path_name, path_fn in possible_paths:
+            try:
+                layers = path_fn()
+                if layers is not None and len(layers) > 0:
+                    print(f"Found layers at: {path_name}")
+                    return layers
+            except (AttributeError, TypeError):
+                continue
+        
+        # If we couldn't find layers, print model structure to help debug
+        print("\n⚠️ Could not find layers. Model structure:")
+        for name, module in self.model.named_children():
+            print(f"  - {name}: {type(module).__name__}")
+            if hasattr(module, 'named_children'):
+                for sub_name, sub_module in module.named_children():
+                    print(f"    - {sub_name}: {type(sub_module).__name__}")
+        
+        raise RuntimeError("Could not find transformer layers in model architecture. See model structure above.")
     
     def _setup_device(self, device: str) -> str:
         """Setup the appropriate device for inference."""
@@ -100,14 +139,16 @@ class DynamicActivationPatcher:
         
         return default
     
-    def load_clean_activations(self, json_path: str, layer: int, position: int) -> torch.Tensor:
+    def load_clean_activations(self, json_path: str, layer: int, position: int, question_idx: int = 0) -> torch.Tensor:
         """
         Load activations from a saved JSON file.
+        Supports both old single-question format and new bulk extraction format.
         
         Args:
             json_path: Path to the residual stream JSON file
             layer: Layer index to load
             position: Token position to load
+            question_idx: Question index for bulk extraction files (default: 0)
             
         Returns:
             Tensor of shape (hidden_size,) containing the activations
@@ -119,27 +160,41 @@ class DynamicActivationPatcher:
         with open(json_path, 'r') as f:
             data = json.load(f)
         
+        # Detect format: bulk extraction has 'results' array, old format has 'token_info' directly
+        if 'results' in data:
+            # New bulk extraction format
+            print(f"  Format: Bulk extraction (question_idx: {question_idx})")
+            if question_idx >= len(data['results']):
+                raise ValueError(f"Question index {question_idx} out of range (max: {len(data['results'])-1})")
+            
+            result = data['results'][question_idx]
+            all_tokens = result.get('all_tokens', [])
+            residual_streams = result.get('residual_stream_hidden_states', {})
+        else:
+            # Old single-question format
+            print(f"  Format: Single question")
+            all_tokens = data.get('token_info', {}).get('all_tokens', [])
+            residual_streams = data.get('residual_stream_hidden_states', {})
+        
         # Get token info for verification
-        all_tokens = data['token_info']['all_tokens']
         if position < len(all_tokens):
             token_info = all_tokens[position]
             print(f"  Token at position {position}: '{token_info['text']}' (id: {token_info['id']})")
         
-        # Navigate to the correct layer and position in the JSON
-        # Structure: data['residual_stream_hidden_states']['layer_X']['position'] = [3584 floats]
+        # Navigate to the correct layer and position
         layer_key = f"layer_{layer}"
         position_key = str(position)
         
-        if 'residual_stream_hidden_states' not in data:
+        if not residual_streams:
             raise ValueError("JSON file does not contain 'residual_stream_hidden_states' key")
         
-        residual_streams = data['residual_stream_hidden_states']
-        
         if layer_key not in residual_streams:
-            raise ValueError(f"Layer {layer} not found in residual_stream_hidden_states")
+            available_layers = list(residual_streams.keys())
+            raise ValueError(f"Layer {layer} not found. Available layers: {available_layers}")
         
         if position_key not in residual_streams[layer_key]:
-            raise ValueError(f"Position {position} not found in layer {layer}")
+            available_positions = list(residual_streams[layer_key].keys())
+            raise ValueError(f"Position {position} not found in layer {layer}. Available positions: {available_positions}")
         
         # Extract hidden states
         hidden_states = torch.tensor(
@@ -203,8 +258,8 @@ class DynamicActivationPatcher:
         if self.hook_handle is not None:
             self.hook_handle.remove()
         
-        # Get the layer module (layers are in model.model.layers)
-        layer_module = self.model.model.layers[layer_idx]
+        # Get the layer module
+        layer_module = self._layers_module[layer_idx]
         
         # Create and register the hook
         hook_fn = self.create_dynamic_patch_hook()
@@ -227,7 +282,7 @@ class DynamicActivationPatcher:
         self,
         prompt: str,
         trigger_token_text: str,
-        max_new_tokens: int = 200,
+        max_new_tokens: int = 1000,
         temperature: float = 1.0,
         do_sample: bool = False
     ) -> Dict:
@@ -352,7 +407,7 @@ class DynamicActivationPatcher:
         prompt: str,
         trigger_token_text: str,
         num_trials: int = 10,
-        max_new_tokens: int = 200,
+        max_new_tokens: int = 1000,
         temperature: float = 1.0,
         do_sample: bool = False
     ) -> Dict:
@@ -543,10 +598,10 @@ def main_position_based():
     print("="*80)
     
     # Configuration
-    CLEAN_JSON_PATH = "/Users/codycomyns/Desktop/mech_interp_research_project/mech_interp_res/hidden_values/residual_stream_normal_range_114_118_20251124_141744.json"
+    CLEAN_JSON_PATH = "/Users/codycomyns/Desktop/Mech_Interp_Research_Project/mech_interp_res/hidden_values/bulk_residual_stream_normal_q0-0_tokens1_20251201_154205.json"
     PATCH_LAYER = 1
-    CLEAN_POSITION = 115  # Position to load clean activations from
-    TARGET_POSITION = 131  # Position in corrupted run where we'll patch
+    CLEAN_POSITION = 114  # Position to load clean activations from
+    TARGET_POSITION = 130  # Position in corrupted run where we'll patch
     
     # The corrupted prompt (incorrect hint)
     CORRUPTED_PROMPT = """You are answering a multiple choice question from the subject: abstract_algebra
@@ -594,7 +649,7 @@ Your response: """
     with torch.no_grad():
         outputs = patcher.model.generate(
             inputs['input_ids'],
-            max_new_tokens=200,
+            max_new_tokens=1000,
             temperature=1.0,
             do_sample=False,
             pad_token_id=patcher.tokenizer.eos_token_id
@@ -647,7 +702,7 @@ Your response: """
         PATCH_LAYER,
         clean_activations,
         TARGET_POSITION,
-        max_new_tokens=200,
+        max_new_tokens=1000,
         temperature=1.0,
         do_sample=False
     )
@@ -718,7 +773,7 @@ def generate_with_position_patch(
     patch_layer: int,
     patch_activations: torch.Tensor,
     target_position: int,
-    max_new_tokens: int = 200,
+    max_new_tokens: int = 1000,
     temperature: float = 1.0,
     do_sample: bool = False
 ) -> Dict:
@@ -780,7 +835,7 @@ def generate_with_position_patch(
             return hidden_states
     
     # Register hook
-    layer_module = patcher.model.model.layers[patch_layer]
+    layer_module = patcher._layers_module[patch_layer]
     hook_handle = layer_module.register_forward_hook(position_based_hook)
     
     # Generate tokens one at a time
@@ -925,7 +980,7 @@ Your response: """
     with torch.no_grad():
         outputs = patcher.model.generate(
             inputs['input_ids'],
-            max_new_tokens=200,
+            max_new_tokens=1000,
             temperature=1.0,
             do_sample=False,
             pad_token_id=patcher.tokenizer.eos_token_id
@@ -984,7 +1039,7 @@ Your response: """
             layer_idx,
             clean_activations,
             TARGET_POSITION,
-            max_new_tokens=250,
+            max_new_tokens=1000,
             temperature=1.0,
             do_sample=False
         )
