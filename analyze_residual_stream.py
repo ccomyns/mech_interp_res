@@ -126,20 +126,52 @@ class ResidualStreamAnalyzer:
             print(f"❌ Error loading model: {e}")
             raise
     
-    def load_residual_stream_data(self, json_path: str) -> Dict[str, Any]:
+    def load_residual_stream_data(self, json_path: str, question_idx: int = 0) -> Dict[str, Any]:
         """
         Load residual stream data from JSON file.
+        Supports both old single-question format and new bulk extraction format.
         
         Args:
             json_path: Path to the residual stream JSON file
+            question_idx: Question index for bulk extraction files (default: 0)
             
         Returns:
-            Dictionary with all the saved data
+            Dictionary with normalized data structure
         """
         print(f"\n📂 Loading residual stream data from: {json_path}")
         
         with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            raw_data = json.load(f)
+        
+        # Detect format: bulk extraction has 'results' array
+        if 'results' in raw_data:
+            # New bulk extraction format - normalize to standard structure
+            print(f"   Format: Bulk extraction (question_idx: {question_idx})")
+            if question_idx >= len(raw_data['results']):
+                raise ValueError(f"Question index {question_idx} out of range (max: {len(raw_data['results'])-1})")
+            
+            result = raw_data['results'][question_idx]
+            
+            # Normalize to standard structure
+            data = {
+                'metadata': raw_data['metadata'],
+                'question_info': result.get('question_info', {}),
+                'response': result.get('raw_response', ''),
+                'prompt': result.get('prompt', ''),
+                'full_text': result.get('full_text', ''),
+                'token_info': {
+                    'all_tokens': result.get('all_tokens', []),
+                    'total_token_count': result.get('total_token_count', 0),
+                    'prompt_token_count': result.get('prompt_token_count', 0),
+                    'saved_token_count': len(result.get('all_tokens', [])),
+                },
+                'residual_stream_hidden_states': result.get('residual_stream_hidden_states', {}),
+                'layers_captured': raw_data.get('layers_captured', []),
+            }
+        else:
+            # Old single-question format
+            print(f"   Format: Single question")
+            data = raw_data
         
         self.loaded_data = data
         
@@ -150,17 +182,22 @@ class ResidualStreamAnalyzer:
         print(f"   Hidden size: {data['metadata']['hidden_size']}")
         print(f"   Total tokens: {data['token_info']['total_token_count']}")
         
-        # Handle both cutoff mode and range mode
-        mode = data['metadata'].get('mode', 'cutoff')  # Default to cutoff for backwards compatibility
+        # Handle different modes
+        if 'layers_captured' in data and data['layers_captured']:
+            print(f"   Layers captured: {data['layers_captured']}")
+        
+        mode = data['metadata'].get('mode', 'bulk' if 'results' in raw_data else 'cutoff')
         if mode == 'range':
             start_pos, end_pos = data['metadata']['token_range']
             print(f"   Mode: Token range")
             print(f"   Token range: [{start_pos}, {end_pos}]")
-            print(f"   Tokens saved: {data['token_info']['saved_token_count']}")
+            print(f"   Tokens saved: {data['token_info'].get('saved_token_count', 'N/A')}")
+        elif mode == 'bulk':
+            print(f"   Mode: Bulk extraction")
         else:
             print(f"   Mode: Cutoff")
-            print(f"   CoT tokens saved: {data['token_info']['cot_token_count']}")
-            print(f"   Cutoff position: {data['metadata']['cutoff_position']}")
+            print(f"   CoT tokens saved: {data['token_info'].get('cot_token_count', 'N/A')}")
+            print(f"   Cutoff position: {data['metadata'].get('cutoff_position', 'N/A')}")
         
         return data
     
@@ -180,12 +217,44 @@ class ResidualStreamAnalyzer:
         if data is None:
             raise ValueError("No data loaded. Call load_residual_stream_data() first.")
         
-        # Get positions from any layer (they should all be the same)
-        layer_key = "layer_0"
-        hidden_states = data['residual_stream_hidden_states'][layer_key]
+        # Get positions from any available layer (they should all be the same)
+        residual_states = data['residual_stream_hidden_states']
+        
+        # Find first available layer
+        layer_key = None
+        for key in residual_states.keys():
+            if key.startswith('layer_'):
+                layer_key = key
+                break
+        
+        if layer_key is None:
+            raise ValueError("No layer data found in residual_stream_hidden_states")
+        
+        hidden_states = residual_states[layer_key]
         positions = sorted([int(pos) for pos in hidden_states.keys()])
         
         return positions
+    
+    def get_available_layers(self, data: Optional[Dict[str, Any]] = None) -> List[int]:
+        """
+        Get list of layer indices that have saved hidden states.
+        
+        Args:
+            data: Loaded data dictionary (uses self.loaded_data if None)
+            
+        Returns:
+            Sorted list of layer indices
+        """
+        if data is None:
+            data = self.loaded_data
+        
+        if data is None:
+            raise ValueError("No data loaded. Call load_residual_stream_data() first.")
+        
+        residual_states = data['residual_stream_hidden_states']
+        layers = sorted([int(key.split('_')[1]) for key in residual_states.keys() if key.startswith('layer_')])
+        
+        return layers
     
     def normalize_and_unembed(self, hidden_state: torch.Tensor) -> torch.Tensor:
         """
@@ -202,15 +271,39 @@ class ResidualStreamAnalyzer:
             hidden_state = hidden_state.unsqueeze(0)  # [1, hidden_size]
         
         # Apply final layer normalization
-        # For Gemma-3, this is model.model.norm
+        # Find the norm layer (different paths for different model architectures)
+        norm_layer = self._find_norm_layer()
+        
         with torch.no_grad():
-            normalized = self.model.model.norm(hidden_state)
+            normalized = norm_layer(hidden_state)
             
             # Apply language model head (unembedding)
             logits = self.model.lm_head(normalized)
         
         # Return as 1D tensor
         return logits.squeeze(0)  # [vocab_size]
+    
+    def _find_norm_layer(self):
+        """
+        Find the final norm layer in the model.
+        Different model architectures store it in different places.
+        """
+        # Try different possible paths
+        possible_paths = [
+            lambda: self.model.model.norm,  # Gemma 2, Llama, etc.
+            lambda: self.model.model.language_model.norm,  # Gemma 3 multimodal
+            lambda: self.model.transformer.ln_f,  # GPT-2 style
+        ]
+        
+        for path_fn in possible_paths:
+            try:
+                norm = path_fn()
+                if norm is not None:
+                    return norm
+            except (AttributeError, TypeError):
+                continue
+        
+        raise RuntimeError("Could not find final normalization layer in model architecture")
     
     def get_logits_for_position(self, token_position: int, layer_idx: int,
                                 data: Optional[Dict[str, Any]] = None) -> torch.Tensor:
@@ -458,22 +551,27 @@ class ResidualStreamAnalyzer:
         # Load data
         data = self.load_residual_stream_data(json_path)
         
-        # Get available positions
+        # Get available positions and layers
         positions = self.get_available_token_positions(data)
+        available_layers = self.get_available_layers(data)
+        
         print(f"\n📍 Available token positions: {positions[0]} to {positions[-1]}")
         print(f"   Total positions: {len(positions)}")
+        print(f"📊 Available layers: {available_layers}")
         
-        # Show some context
+        # Show some context (handle missing fields gracefully)
         print(f"\n📝 Context:")
-        print(f"   Question: {data['question_info']['question'][:80]}...")
-        print(f"   Response: {data['response'][:80]}...")
+        question = data.get('question_info', {}).get('question', 'N/A')
+        response = data.get('response', 'N/A')
+        print(f"   Question: {question[:80]}..." if len(question) > 80 else f"   Question: {question}")
+        print(f"   Response: {response[:80]}..." if len(response) > 80 else f"   Response: {response}")
         
         while True:
             print(f"\n{'='*80}")
             print("INTERACTIVE ANALYSIS MENU")
             print(f"{'='*80}")
             print("1. Analyze specific token position at specific layer")
-            print("2. Compare predictions across all layers for a token")
+            print("2. Compare predictions across all available layers for a token")
             print("3. Compare predictions across selected layers for a token")
             print("4. Show token positions and their actual tokens")
             print("5. Exit")
@@ -493,11 +591,11 @@ class ResidualStreamAnalyzer:
                     print("❌ Invalid input")
                     continue
                 
-                layer_input = input(f"Enter layer index (0-{data['metadata']['num_layers']-1}): ").strip()
+                layer_input = input(f"Enter layer index (available: {available_layers}): ").strip()
                 try:
                     layer_idx = int(layer_input)
-                    if layer_idx < 0 or layer_idx >= data['metadata']['num_layers']:
-                        print(f"⚠️  Layer {layer_idx} out of range")
+                    if layer_idx not in available_layers:
+                        print(f"⚠️  Layer {layer_idx} not available. Available layers: {available_layers}")
                         continue
                 except ValueError:
                     print("❌ Invalid input")
@@ -509,7 +607,7 @@ class ResidualStreamAnalyzer:
                 self.analyze_token_position(token_pos, layer_idx, top_k=top_k, data=data)
                 
             elif choice == "2":
-                # Compare across all layers
+                # Compare across all available layers
                 pos_input = input(f"Enter token position ({positions[0]}-{positions[-1]}): ").strip()
                 try:
                     token_pos = int(pos_input)
@@ -523,7 +621,8 @@ class ResidualStreamAnalyzer:
                 top_k_input = input("Number of top predictions per layer [default: 5]: ").strip()
                 top_k = int(top_k_input) if top_k_input else 5
                 
-                self.compare_predictions_across_layers(token_pos, layer_indices=None, 
+                # Use available layers instead of None (which would try all layers)
+                self.compare_predictions_across_layers(token_pos, layer_indices=available_layers, 
                                                       top_k=top_k, data=data)
                 
             elif choice == "3":
@@ -538,12 +637,12 @@ class ResidualStreamAnalyzer:
                     print("❌ Invalid input")
                     continue
                 
-                layers_input = input(f"Enter layer indices (comma-separated, e.g. '0,10,20,41'): ").strip()
+                layers_input = input(f"Enter layer indices (comma-separated, available: {available_layers}): ").strip()
                 try:
                     layer_indices = [int(x.strip()) for x in layers_input.split(',')]
-                    max_layer = data['metadata']['num_layers'] - 1
-                    if any(l < 0 or l > max_layer for l in layer_indices):
-                        print(f"⚠️  Some layers out of range (0-{max_layer})")
+                    invalid_layers = [l for l in layer_indices if l not in available_layers]
+                    if invalid_layers:
+                        print(f"⚠️  Layers not available: {invalid_layers}. Available: {available_layers}")
                         continue
                 except ValueError:
                     print("❌ Invalid input")
@@ -563,9 +662,15 @@ class ResidualStreamAnalyzer:
                 print(f"{'Position':<10} {'Token ID':<10} {'Token'}")
                 print(f"{'─'*80}")
                 
+                all_tokens = data['token_info'].get('all_tokens', [])
+                shown = 0
                 for pos in positions[:50]:  # Show first 50
-                    token = data['token_info']['all_tokens'][pos]
-                    print(f"{pos:<10} {token['id']:<10} {repr(token['text'])}")
+                    if pos < len(all_tokens):
+                        token = all_tokens[pos]
+                        print(f"{pos:<10} {token['id']:<10} {repr(token['text'])}")
+                        shown += 1
+                    else:
+                        print(f"{pos:<10} {'N/A':<10} (token info not available)")
                 
                 if len(positions) > 50:
                     print(f"\n... and {len(positions) - 50} more positions")
