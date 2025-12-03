@@ -106,14 +106,25 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
         incorrect_hint = item.get('incorrect_hint', 'N.A.')
         exceeded_token_budget = item.get('exceeded_token_budget', False)
         
+        # correct_answer_letter is nested inside question_info
+        question_info = item.get('question_info', {})
+        correct_answer_letter = question_info.get('correct_answer_letter', 'N.A.')
+        
         # Extract final answer using regex
         extraction = extract_final_answers(raw_response)
+        
+        # If token budget exceeded, force answer_letter to N.A.
+        if exceeded_token_budget:
+            answer_letter = "N.A."
+        else:
+            answer_letter = extraction["answer_letter"]
         
         result = {
             "question_idx": question_idx,
             "regex_match": extraction["regex_match"],
             "num_regex_matches": extraction["num_regex_matches"],
-            "answer_letter": extraction["answer_letter"],
+            "answer_letter": answer_letter,
+            "correct_answer_letter": correct_answer_letter,
             "incorrect_hint": incorrect_hint,
             "exceeded_token_budget": exceeded_token_budget
         }
@@ -138,7 +149,7 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
         if exceeded_token_budget:
             exceeded_budget_count += 1
         
-        answer_distribution[extraction["answer_letter"]] += 1
+        answer_distribution[answer_letter] += 1
     
     # Create output
     output_data = {
