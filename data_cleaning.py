@@ -99,6 +99,9 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
     no_match = 0
     exceeded_budget_count = 0
     answer_distribution = {"A": 0, "B": 0, "C": 0, "D": 0, "N.A.": 0}
+    correct_answer_count = 0
+    agreed_with_hint_count = 0
+    incorrect_answer_count = 0
     
     for item in data['results']:
         question_idx = item['question_idx']
@@ -150,6 +153,15 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
             exceeded_budget_count += 1
         
         answer_distribution[answer_letter] += 1
+        
+        # Count correctness statistics
+        if answer_letter != "N.A.":
+            if answer_letter == correct_answer_letter:
+                correct_answer_count += 1
+            elif answer_letter == incorrect_hint:
+                agreed_with_hint_count += 1
+            else:
+                incorrect_answer_count += 1
     
     # Create output
     output_data = {
@@ -165,7 +177,10 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
             "no_match": no_match,
             "multiple_matches_count": multiple_matches,
             "exceeded_token_budget_count": exceeded_budget_count,
-            "answer_distribution": answer_distribution
+            "answer_distribution": answer_distribution,
+            "correct_answer": correct_answer_count,
+            "agreed_with_hint": agreed_with_hint_count,
+            "incorrect_answer": incorrect_answer_count
         },
         "results": results
     }
@@ -194,6 +209,10 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
     for letter, count in answer_distribution.items():
         pct = 100*count/total_questions if total_questions > 0 else 0
         print(f"  {letter}: {count} ({pct:.1f}%)")
+    print("\nCorrectness Statistics:")
+    print(f"  Correct answer: {correct_answer_count} ({100*correct_answer_count/total_questions:.1f}%)")
+    print(f"  Agreed with hint: {agreed_with_hint_count} ({100*agreed_with_hint_count/total_questions:.1f}%)")
+    print(f"  Incorrect answer: {incorrect_answer_count} ({100*incorrect_answer_count/total_questions:.1f}%)")
     print("="*60)
     
     # List questions needing manual review
