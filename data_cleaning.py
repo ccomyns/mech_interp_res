@@ -14,13 +14,20 @@ from pathlib import Path
 
 def extract_final_answers(raw_response: str) -> dict:
     """
-    Search for "Final Answer: {Letter}" patterns in the raw response.
+    Search for answer patterns in the raw response.
     
-    Matches patterns like:
+    First tries the main pattern across the entire text:
     - "Final Answer: A\n"
     - "Final Answer: A*"
     - "Final Answer: A." 
     - "Final Answer: A " (with trailing space or end of string)
+    
+    If no match found, checks the last 100 characters for additional patterns:
+    - "Therefore, my answer is {letter}"
+    - "Therefore, the answer is {letter}"
+    - "**Final Answer:** {letter}"
+    - "**Answer:** {letter}"
+    - "Answer: {letter}"
     
     Args:
         raw_response: The model's raw response text
@@ -28,16 +35,36 @@ def extract_final_answers(raw_response: str) -> dict:
     Returns:
         dict with regex_match, num_regex_matches, answer_letter, all_matches
     """
-    # Pattern matches "Final Answer:" followed by optional whitespace, 
+    # Primary pattern matches "Final Answer:" followed by optional whitespace, 
     # then a letter A-D, followed by newline, asterisk, period, space, or end of string
-    pattern = r'Final Answer:\s*([ABCD])(?:\n|\*|\.|\s|$)'
+    primary_pattern = r'Final Answer:\s*([ABCD])(?:\n|\*|\.|\s|$)'
     
-    matches = re.findall(pattern, raw_response, re.IGNORECASE)
+    matches = re.findall(primary_pattern, raw_response, re.IGNORECASE)
     
     # Normalize matches to uppercase
     matches = [m.upper() for m in matches]
     
     num_matches = len(matches)
+    
+    # If no matches found with primary pattern, check last 100 characters with additional patterns
+    if num_matches == 0:
+        last_100_chars = raw_response[-100:] if len(raw_response) > 100 else raw_response
+        
+        # Additional patterns to check in the last 100 characters
+        additional_patterns = [
+            r'Therefore,\s+my\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+            r'Therefore,\s+the\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+            r'\*\*Final\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+            r'\*\*Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+            r'Answer:\s+([ABCD])(?:\.|,|\s|$)'
+        ]
+        
+        for pattern in additional_patterns:
+            matches = re.findall(pattern, last_100_chars, re.IGNORECASE)
+            if matches:
+                matches = [m.upper() for m in matches]
+                num_matches = len(matches)
+                break
     
     if num_matches == 0:
         return {
@@ -184,7 +211,16 @@ def process_bulk_extraction(input_path: str, output_path: str = None, create_man
             "source_file": str(input_path),
             "processing_date": datetime.now().isoformat(),
             "total_questions": total_questions,
-            "regex_pattern": r'Final Answer:\s*([ABCD])(?:\n|\*|\.|\s|$)'
+            "regex_patterns": {
+                "primary": r'Final Answer:\s*([ABCD])(?:\n|\*|\.|\s|$)',
+                "additional_last_100_chars": [
+                    r'Therefore,\s+my\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'Therefore,\s+the\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'\*\*Final\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+                    r'\*\*Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+                    r'Answer:\s+([ABCD])(?:\.|,|\s|$)'
+                ]
+            }
         },
         "statistics": {
             "total_questions": total_questions,
@@ -216,26 +252,9 @@ def process_bulk_extraction(input_path: str, output_path: str = None, create_man
         input_file = Path(input_path)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Save as JSON
-        manual_json_path = input_file.parent / f"manual_review_{timestamp}.json"
-        manual_output = {
-            "metadata": {
-                "source_file": str(input_path),
-                "creation_date": datetime.now().isoformat(),
-                "total_items": len(manual_review_items),
-                "description": "Questions where extracted answer is N.A. and token budget was not exceeded. Requires manual inspection."
-            },
-            "instructions": "For each question, read the raw_response and fill in the 'manual_answer' field with the letter (A, B, C, or D) that the model selected, or leave empty if truly no answer was given.",
-            "questions": manual_review_items
-        }
-        
-        print(f"Saving manual review JSON to: {manual_json_path}")
-        with open(manual_json_path, 'w') as f:
-            json.dump(manual_output, f, indent=2)
-        
-        # Save as readable text file
+        # Save as readable text file only
         manual_txt_path = input_file.parent / f"manual_review_{timestamp}.txt"
-        print(f"Saving readable text file to: {manual_txt_path}")
+        print(f"Saving manual review text file to: {manual_txt_path}")
         with open(manual_txt_path, 'w') as f:
             f.write("="*80 + "\n")
             f.write("MANUAL REVIEW - Questions Needing Answer Extraction\n")
@@ -272,11 +291,10 @@ def process_bulk_extraction(input_path: str, output_path: str = None, create_man
                 f.write(item['raw_response'])
                 f.write("\n" + "-"*80 + "\n\n")
                 
-                f.write("MANUAL ANSWER: ___________\n")
+                f.write("MANUAL ANSWER:\n")
                 f.write("\n")
         
         print(f"✓ {len(manual_review_items)} questions require manual review")
-        print(f"✓ Created both JSON and TXT formats for easier reading")
     elif create_manual_review:
         print("No questions require manual review (all N.A. answers exceeded token budget)")
     
