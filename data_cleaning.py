@@ -74,13 +74,14 @@ def extract_final_answers(raw_response: str) -> dict:
             }
 
 
-def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
+def process_bulk_extraction(input_path: str, output_path: str = None, create_manual_review: bool = False) -> dict:
     """
     Process all questions in the bulk extraction JSON file.
     
     Args:
         input_path: Path to the bulk extraction JSON file
         output_path: Optional path for output JSON (auto-generated if not provided)
+        create_manual_review: If True, create a separate JSON for manual review of N.A. answers
         
     Returns:
         dict containing all results and summary statistics
@@ -91,6 +92,7 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
         data = json.load(f)
     
     results = []
+    manual_review_items = []  # For --manual flag
     
     # Statistics
     total_questions = 0
@@ -138,6 +140,19 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
             result["needs_manual_review"] = True
         
         results.append(result)
+        
+        # Collect items for manual review if --manual flag is set
+        if create_manual_review and answer_letter == "N.A." and not exceeded_token_budget:
+            manual_item = {
+                "question_idx": question_idx,
+                "question": question_info.get('question', 'N.A.'),
+                "choices": question_info.get('choices', []),
+                "correct_answer_letter": correct_answer_letter,
+                "incorrect_hint": incorrect_hint,
+                "raw_response": raw_response,
+                "manual_answer": ""
+            }
+            manual_review_items.append(manual_item)
         
         # Update statistics
         total_questions += 1
@@ -196,6 +211,75 @@ def process_bulk_extraction(input_path: str, output_path: str = None) -> dict:
     with open(output_path, 'w') as f:
         json.dump(output_data, f, indent=2)
     
+    # Save manual review file if requested
+    if create_manual_review and manual_review_items:
+        input_file = Path(input_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Save as JSON
+        manual_json_path = input_file.parent / f"manual_review_{timestamp}.json"
+        manual_output = {
+            "metadata": {
+                "source_file": str(input_path),
+                "creation_date": datetime.now().isoformat(),
+                "total_items": len(manual_review_items),
+                "description": "Questions where extracted answer is N.A. and token budget was not exceeded. Requires manual inspection."
+            },
+            "instructions": "For each question, read the raw_response and fill in the 'manual_answer' field with the letter (A, B, C, or D) that the model selected, or leave empty if truly no answer was given.",
+            "questions": manual_review_items
+        }
+        
+        print(f"Saving manual review JSON to: {manual_json_path}")
+        with open(manual_json_path, 'w') as f:
+            json.dump(manual_output, f, indent=2)
+        
+        # Save as readable text file
+        manual_txt_path = input_file.parent / f"manual_review_{timestamp}.txt"
+        print(f"Saving readable text file to: {manual_txt_path}")
+        with open(manual_txt_path, 'w') as f:
+            f.write("="*80 + "\n")
+            f.write("MANUAL REVIEW - Questions Needing Answer Extraction\n")
+            f.write("="*80 + "\n\n")
+            f.write(f"Source: {input_path}\n")
+            f.write(f"Created: {datetime.now().isoformat()}\n")
+            f.write(f"Total Questions: {len(manual_review_items)}\n\n")
+            f.write("INSTRUCTIONS:\n")
+            f.write("Read each question and the model's raw response. On the line marked\n")
+            f.write("'MANUAL ANSWER:', write the letter (A, B, C, or D) that the model\n")
+            f.write("selected, or write 'NONE' if no clear answer was given.\n")
+            f.write("="*80 + "\n\n")
+            
+            for i, item in enumerate(manual_review_items, 1):
+                f.write("\n" + "="*80 + "\n")
+                f.write(f"Question {i} of {len(manual_review_items)} (Index: {item['question_idx']})\n")
+                f.write("="*80 + "\n\n")
+                
+                f.write("QUESTION:\n")
+                f.write(item['question'] + "\n\n")
+                
+                f.write("CHOICES:\n")
+                choices = item.get('choices', [])
+                for j, choice in enumerate(choices):
+                    letter = chr(65 + j)  # A, B, C, D
+                    f.write(f"{letter}. {choice}\n")
+                f.write("\n")
+                
+                f.write(f"Correct Answer: {item['correct_answer_letter']}\n")
+                f.write(f"Incorrect Hint Given: {item['incorrect_hint']}\n\n")
+                
+                f.write("MODEL'S RAW RESPONSE:\n")
+                f.write("-"*80 + "\n")
+                f.write(item['raw_response'])
+                f.write("\n" + "-"*80 + "\n\n")
+                
+                f.write("MANUAL ANSWER: ___________\n")
+                f.write("\n")
+        
+        print(f"✓ {len(manual_review_items)} questions require manual review")
+        print(f"✓ Created both JSON and TXT formats for easier reading")
+    elif create_manual_review:
+        print("No questions require manual review (all N.A. answers exceeded token budget)")
+    
     # Print summary
     print("\n" + "="*60)
     print("PROCESSING SUMMARY")
@@ -242,10 +326,15 @@ def main():
         default=None,
         help="Output JSON file path (auto-generated if not provided)"
     )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Create a separate JSON file for manual review of questions where answer is N.A. and token budget not exceeded"
+    )
     
     args = parser.parse_args()
     
-    process_bulk_extraction(args.input_file, args.output)
+    process_bulk_extraction(args.input_file, args.output, args.manual)
 
 
 if __name__ == "__main__":
