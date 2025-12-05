@@ -2,29 +2,24 @@
 """
 Linear Probe Training for Residual Stream Analysis
 
-This script trains two linear probes on residual stream hidden states extracted
+This script trains a binary linear probe on residual stream hidden states extracted
 from Gemma-3-4B's responses to MMLU questions with incorrect hints.
 
-Data Categories:
-    1. correct_answer: Model chose the correct answer
-    2. incorrect_not_hint: Model chose an incorrect answer that is NOT the hint
-    3. chose_hint: Model chose the incorrect hint answer
-    4. exceeded_budget: Model hit the token limit
+The probe classifies:
+    - correct_answer (-1): Model chose the correct answer
+    - agrees_with_hint (+1): Model agreed with the incorrect hint
 
-Probe 1: Agrees vs Against Hint
-    - agrees_with_hint (+1): chose_hint
-    - went_against_hint (-1): correct_answer, incorrect_not_hint
-    - Excludes: exceeded_budget
-
-Probe 2: Distracted vs Found Answer
-    - distracted_by_hint (+1): exceeded_budget
-    - found_answer (-1): correct_answer, incorrect_not_hint, chose_hint
+Each question has exactly one token position saved per layer, so the position is
+auto-detected for each question.
 
 Usage:
-    python linear_probe_training.py <labeled_json_path> [options]
+    python linear_probe_training.py <categorized_json_path> <bulk_file1> <bulk_file2> [options]
 
 Example:
-    python linear_probe_training.py hidden_values/labeled_results.json --layer 1 --position 114
+    python linear_probe_training.py data_collection_linear_probe/categorized_data.json \
+        data_collection_linear_probe/bulk_residual_stream_incorrect_hint_q0-569_tokens1_20251202_214545.json \
+        data_collection_linear_probe/bulk_residual_stream_incorrect_hint_q570-1139_tokens1_20251203_210144.json \
+        --layer 1
 """
 
 import json
@@ -72,178 +67,196 @@ class ProbeResults:
 # Data Loading and Preprocessing
 # ============================================================================
 
-def load_labeled_data(json_path: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+def load_categorized_data(json_path: str) -> Tuple[Dict[str, Any], Dict[str, List[Dict]]]:
     """
-    Load labeled data from JSON file.
+    Load categorized data from JSON file.
     
     Expected JSON structure:
     {
         "metadata": {...},
-        "results": [
-            {
-                "question_idx": 0,
-                "category": "correct_answer" | "incorrect_not_hint" | "chose_hint" | "exceeded_budget",
-                "residual_stream_hidden_states": {
-                    "layer_1": {"114": [...], ...},
-                    "layer_18": {"114": [...], ...}
-                },
-                ...
-            },
+        "statistics": {...},
+        "correct_answer": [
+            {"question_idx": 5, "answer_letter": "B", "correct_answer_letter": "B", 
+             "incorrect_hint": "A", "split": "train"},
+            ...
+        ],
+        "agrees_with_hint": [
+            {"question_idx": 2, "answer_letter": "D", "correct_answer_letter": "B", 
+             "incorrect_hint": "D", "split": "train"},
             ...
         ]
     }
+    
+    Returns:
+        Tuple of (metadata, categorized_data_dict)
     """
-    print(f"\n📂 Loading labeled data from: {json_path}")
+    print(f"\n📂 Loading categorized data from: {json_path}")
     
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     
     metadata = data.get('metadata', {})
-    results = data.get('results', [])
+    statistics = data.get('statistics', {})
     
-    print(f"✅ Loaded {len(results)} examples")
+    categorized_data = {
+        'correct_answer': data.get('correct_answer', []),
+        'agrees_with_hint': data.get('agrees_with_hint', [])
+    }
     
-    # Count categories
-    category_counts = {}
-    for result in results:
-        cat = result.get('category', 'unknown')
-        category_counts[cat] = category_counts.get(cat, 0) + 1
+    print(f"✅ Loaded categorized data")
+    print(f"\n📊 Statistics:")
+    for key, value in statistics.items():
+        print(f"   {key}: {value}")
     
-    print("\n📊 Category distribution:")
-    for cat, count in sorted(category_counts.items()):
-        print(f"   {cat}: {count}")
-    
-    return metadata, results
+    return metadata, categorized_data
 
 
-def extract_features(results: List[Dict[str, Any]], 
-                     layer: int, 
-                     position: int) -> Tuple[np.ndarray, List[str], List[int]]:
+def load_bulk_residual_streams(bulk_files: List[str], 
+                                question_indices: List[int]) -> Dict[int, Dict[str, Any]]:
     """
-    Extract feature vectors from residual stream hidden states.
+    Load residual stream data for specific question indices from bulk JSON files.
     
     Args:
-        results: List of result dictionaries from JSON
-        layer: Which layer to extract (e.g., 1 or 18)
-        position: Which token position to extract
+        bulk_files: List of paths to bulk residual stream JSON files
+        question_indices: List of question indices to load
         
     Returns:
-        Tuple of (features array, categories list, question indices list)
+        Dictionary mapping question_idx to residual stream data
+    """
+    print(f"\n📂 Loading residual streams from {len(bulk_files)} bulk file(s)...")
+    
+    # Create a set for faster lookup
+    target_indices = set(question_indices)
+    residual_streams = {}
+    
+    for bulk_file in bulk_files:
+        print(f"   Loading: {bulk_file}")
+        with open(bulk_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        results = data.get('results', [])
+        
+        for result in results:
+            q_idx = result.get('question_idx')
+            if q_idx in target_indices:
+                residual_streams[q_idx] = {
+                    'residual_stream_hidden_states': result.get('residual_stream_hidden_states', {}),
+                    'question_idx': q_idx
+                }
+                
+    print(f"✅ Loaded residual streams for {len(residual_streams)}/{len(target_indices)} questions")
+    
+    missing = target_indices - set(residual_streams.keys())
+    if missing:
+        print(f"⚠️  Warning: {len(missing)} questions not found in bulk files")
+        print(f"   Missing indices: {sorted(list(missing))[:10]}{'...' if len(missing) > 10 else ''}")
+    
+    return residual_streams
+
+
+def extract_features_from_categorized(categorized_data: Dict[str, List[Dict]],
+                                      residual_streams: Dict[int, Dict[str, Any]],
+                                      layer: int,
+                                      split: str = 'train') -> Tuple[np.ndarray, np.ndarray, List[int]]:
+    """
+    Extract feature vectors and labels from categorized data and residual streams.
+    
+    Each question has exactly one position saved per layer, so position is auto-detected
+    for each question.
+    
+    Args:
+        categorized_data: Dictionary with 'correct_answer' and 'agrees_with_hint' lists
+        residual_streams: Dictionary mapping question_idx to residual stream data
+        layer: Which layer to extract (e.g., 1 or 18)
+        split: Which split to extract ('train' or 'test')
+        
+    Returns:
+        Tuple of (features array, labels array, question indices list)
     """
     features = []
-    categories = []
+    labels = []
     question_indices = []
     
     layer_key = f"layer_{layer}"
-    position_key = str(position)
     
-    for result in results:
-        if 'error' in result:
+    # Process correct_answer category (label = -1)
+    for item in categorized_data['correct_answer']:
+        if item.get('split') != split:
             continue
             
-        hidden_states = result.get('residual_stream_hidden_states', {})
+        q_idx = item['question_idx']
+        
+        if q_idx not in residual_streams:
+            continue
+        
+        hidden_states = residual_streams[q_idx].get('residual_stream_hidden_states', {})
         
         if layer_key not in hidden_states:
-            print(f"⚠️  Layer {layer} not found for question {result.get('question_idx', '?')}")
+            continue
+        
+        # Get the single position available for this question
+        layer_data = hidden_states[layer_key]
+        if not layer_data:
+            continue
+        
+        # There should be exactly one position - get it
+        position_key = list(layer_data.keys())[0]
+        hidden_vector = np.array(layer_data[position_key])
+        features.append(hidden_vector)
+        labels.append(-1)  # correct_answer
+        question_indices.append(q_idx)
+    
+    # Process agrees_with_hint category (label = +1)
+    for item in categorized_data['agrees_with_hint']:
+        if item.get('split') != split:
             continue
             
-        if position_key not in hidden_states[layer_key]:
-            print(f"⚠️  Position {position} not found for question {result.get('question_idx', '?')}")
+        q_idx = item['question_idx']
+        
+        if q_idx not in residual_streams:
             continue
         
-        hidden_vector = np.array(hidden_states[layer_key][position_key])
-        category = result.get('category', 'unknown')
+        hidden_states = residual_streams[q_idx].get('residual_stream_hidden_states', {})
         
+        if layer_key not in hidden_states:
+            continue
+        
+        # Get the single position available for this question
+        layer_data = hidden_states[layer_key]
+        if not layer_data:
+            continue
+        
+        # There should be exactly one position - get it
+        position_key = list(layer_data.keys())[0]
+        hidden_vector = np.array(layer_data[position_key])
         features.append(hidden_vector)
-        categories.append(category)
-        question_indices.append(result.get('question_idx', -1))
+        labels.append(+1)  # agrees_with_hint
+        question_indices.append(q_idx)
     
-    return np.array(features), categories, question_indices
+    return np.array(features), np.array(labels), question_indices
 
 
-def get_available_layers_and_positions(results: List[Dict[str, Any]]) -> Tuple[List[int], List[int]]:
-    """Get the available layers and positions from the data."""
+def get_available_layers(residual_streams: Dict[int, Dict[str, Any]]) -> List[int]:
+    """Get the available layers from the residual stream data."""
     layers = set()
-    positions = set()
     
-    for result in results:
-        if 'error' in result:
-            continue
-        hidden_states = result.get('residual_stream_hidden_states', {})
-        for layer_key, pos_dict in hidden_states.items():
+    for q_idx, data in residual_streams.items():
+        hidden_states = data.get('residual_stream_hidden_states', {})
+        for layer_key in hidden_states.keys():
             if layer_key.startswith('layer_'):
                 layers.add(int(layer_key.split('_')[1]))
-                for pos_key in pos_dict.keys():
-                    positions.add(int(pos_key))
     
-    return sorted(layers), sorted(positions)
+    return sorted(layers)
 
 
 # ============================================================================
 # Probe Training Functions
 # ============================================================================
 
-def prepare_probe1_data(features: np.ndarray, 
-                        categories: List[str],
-                        question_indices: List[int]) -> Tuple[np.ndarray, np.ndarray, List[int]]:
-    """
-    Prepare data for Probe 1: Agrees vs Against Hint
-    
-    Labels:
-        +1 (agrees_with_hint): chose_hint
-        -1 (went_against_hint): correct_answer, incorrect_not_hint
-        
-    Excludes: exceeded_budget
-    """
-    X = []
-    y = []
-    indices = []
-    
-    for i, (feat, cat, idx) in enumerate(zip(features, categories, question_indices)):
-        if cat == 'exceeded_budget':
-            continue  # Exclude from this probe
-        elif cat == 'chose_hint':
-            X.append(feat)
-            y.append(1)  # agrees_with_hint
-            indices.append(idx)
-        elif cat in ['correct_answer', 'incorrect_not_hint']:
-            X.append(feat)
-            y.append(-1)  # went_against_hint
-            indices.append(idx)
-    
-    return np.array(X), np.array(y), indices
-
-
-def prepare_probe2_data(features: np.ndarray,
-                        categories: List[str],
-                        question_indices: List[int]) -> Tuple[np.ndarray, np.ndarray, List[int]]:
-    """
-    Prepare data for Probe 2: Distracted vs Found Answer
-    
-    Labels:
-        +1 (distracted_by_hint): exceeded_budget
-        -1 (found_answer): correct_answer, incorrect_not_hint, chose_hint
-    """
-    X = []
-    y = []
-    indices = []
-    
-    for i, (feat, cat, idx) in enumerate(zip(features, categories, question_indices)):
-        if cat == 'exceeded_budget':
-            X.append(feat)
-            y.append(1)  # distracted_by_hint
-            indices.append(idx)
-        elif cat in ['correct_answer', 'incorrect_not_hint', 'chose_hint']:
-            X.append(feat)
-            y.append(-1)  # found_answer
-            indices.append(idx)
-    
-    return np.array(X), np.array(y), indices
-
-
-def train_linear_probe(X: np.ndarray, 
-                       y: np.ndarray,
-                       test_size: float = 0.2,
+def train_linear_probe(X_train: np.ndarray,
+                       y_train: np.ndarray,
+                       X_test: np.ndarray,
+                       y_test: np.ndarray,
                        random_state: int = 42,
                        n_cv_folds: int = 5,
                        regularization: float = 1.0) -> ProbeResults:
@@ -251,9 +264,10 @@ def train_linear_probe(X: np.ndarray,
     Train a linear probe (logistic regression) on the data.
     
     Args:
-        X: Feature matrix (n_samples, n_features)
-        y: Labels (+1 or -1)
-        test_size: Fraction of data to use for testing
+        X_train: Training feature matrix (n_samples, n_features)
+        y_train: Training labels (+1 or -1)
+        X_test: Test feature matrix
+        y_test: Test labels
         random_state: Random seed for reproducibility
         n_cv_folds: Number of cross-validation folds
         regularization: L2 regularization strength (C parameter)
@@ -262,18 +276,14 @@ def train_linear_probe(X: np.ndarray,
         ProbeResults object with training results
     """
     # Check if we have enough samples
-    n_samples = len(y)
+    n_samples = len(y_train)
     if n_samples < 10:
         raise ValueError(f"Not enough samples for training: {n_samples}")
     
     # Scale features
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=test_size, random_state=random_state, stratify=y
-    )
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
     
     # Train logistic regression
     probe = LogisticRegression(
@@ -282,17 +292,17 @@ def train_linear_probe(X: np.ndarray,
         solver='lbfgs',
         random_state=random_state
     )
-    probe.fit(X_train, y_train)
+    probe.fit(X_train_scaled, y_train)
     
     # Evaluate on test set
-    y_pred = probe.predict(X_test)
+    y_pred = probe.predict(X_test_scaled)
     accuracy = accuracy_score(y_test, y_pred)
     
-    # Cross-validation
-    cv_scores = cross_val_score(probe, X_scaled, y, cv=min(n_cv_folds, n_samples // 2))
+    # Cross-validation on training set
+    cv_scores = cross_val_score(probe, X_train_scaled, y_train, cv=min(n_cv_folds, n_samples // 2))
     
     # Classification report
-    report = classification_report(y_test, y_pred, target_names=['Negative (-1)', 'Positive (+1)'])
+    report = classification_report(y_test, y_pred, target_names=['Correct Answer (-1)', 'Agrees with Hint (+1)'])
     
     # Confusion matrix
     cm = confusion_matrix(y_test, y_pred)
@@ -305,7 +315,7 @@ def train_linear_probe(X: np.ndarray,
         confusion_matrix=cm,
         probe_weights=probe.coef_[0],
         probe_bias=probe.intercept_[0],
-        feature_dim=X.shape[1],
+        feature_dim=X_train.shape[1],
         num_train_samples=len(y_train),
         num_test_samples=len(y_test)
     )
@@ -361,13 +371,13 @@ def save_probe_results(results: ProbeResults,
                        probe_name: str,
                        output_path: str,
                        layer: int,
-                       position: int,
+                       position: Optional[int],
                        label_descriptions: Dict[int, str]):
     """Save probe results to JSON file."""
     output_data = {
         'probe_name': probe_name,
         'layer': layer,
-        'position': position,
+        'position': position,  # May be None if auto-detected per question
         'label_descriptions': {str(k): v for k, v in label_descriptions.items()},
         'accuracy': results.accuracy,
         'cross_val_accuracy': results.cross_val_accuracy,
@@ -390,157 +400,112 @@ def save_probe_results(results: ProbeResults,
 # Main Experiment Runner
 # ============================================================================
 
-def run_experiments(json_path: str,
-                    layer: Optional[int] = None,
-                    position: Optional[int] = None,
-                    test_size: float = 0.2,
-                    random_state: int = 42,
-                    save_results: bool = True,
-                    output_dir: str = "probe_results"):
+def run_experiment(categorized_json_path: str,
+                   bulk_files: List[str],
+                   layer: Optional[int] = None,
+                   random_state: int = 42,
+                   save_results: bool = True,
+                   output_dir: str = "probe_results"):
     """
-    Run both linear probe experiments.
+    Run linear probe experiment: Correct Answer vs Agrees with Hint.
     
     Args:
-        json_path: Path to labeled JSON data
+        categorized_json_path: Path to categorized JSON data
+        bulk_files: List of paths to bulk residual stream JSON files
         layer: Layer to extract features from (auto-detected if None)
-        position: Position to extract features from (auto-detected if None)
-        test_size: Fraction of data for testing
         random_state: Random seed
         save_results: Whether to save results to files
         output_dir: Directory for output files
     """
     print("="*80)
-    print("LINEAR PROBE TRAINING EXPERIMENTS")
+    print("LINEAR PROBE TRAINING: Correct Answer vs Agrees with Hint")
     print("="*80)
     
-    # Load data
-    metadata, results = load_labeled_data(json_path)
+    # Load categorized data
+    metadata, categorized_data = load_categorized_data(categorized_json_path)
     
-    # Auto-detect layer and position if not specified
-    available_layers, available_positions = get_available_layers_and_positions(results)
+    # Get all question indices from both categories
+    all_indices = []
+    for item in categorized_data['correct_answer']:
+        all_indices.append(item['question_idx'])
+    for item in categorized_data['agrees_with_hint']:
+        all_indices.append(item['question_idx'])
+    
+    # Load residual streams for those indices
+    residual_streams = load_bulk_residual_streams(bulk_files, all_indices)
+    
+    # Auto-detect layer if not specified
+    available_layers = get_available_layers(residual_streams)
     print(f"\n📍 Available layers: {available_layers}")
-    print(f"📍 Available positions: {available_positions}")
     
     if layer is None:
         layer = available_layers[0] if available_layers else 1
         print(f"   Using layer: {layer} (auto-selected)")
     
-    if position is None:
-        position = available_positions[0] if available_positions else 114
-        print(f"   Using position: {position} (auto-selected)")
+    # Extract training features
+    print(f"\n🔄 Extracting training features from layer {layer}...")
+    X_train, y_train, train_indices = extract_features_from_categorized(
+        categorized_data, residual_streams, layer, split='train'
+    )
     
-    # Extract features
-    print(f"\n🔄 Extracting features from layer {layer}, position {position}...")
-    features, categories, question_indices = extract_features(results, layer, position)
+    if len(X_train) == 0:
+        raise ValueError("No valid training features extracted. Check layer setting.")
     
-    if len(features) == 0:
-        raise ValueError("No valid features extracted. Check layer and position settings.")
+    print(f"✅ Extracted {len(X_train)} training feature vectors of dimension {X_train.shape[1]}")
+    print(f"   Correct answer (-1): {sum(y_train == -1)}")
+    print(f"   Agrees with hint (+1): {sum(y_train == 1)}")
     
-    print(f"✅ Extracted {len(features)} feature vectors of dimension {features.shape[1]}")
+    # Extract test features
+    print(f"\n🔄 Extracting test features from layer {layer}...")
+    X_test, y_test, test_indices = extract_features_from_categorized(
+        categorized_data, residual_streams, layer, split='test'
+    )
     
-    # ========================================================================
-    # PROBE 1: Agrees vs Against Hint
-    # ========================================================================
+    if len(X_test) == 0:
+        raise ValueError("No valid test features extracted. Check layer setting.")
+    
+    print(f"✅ Extracted {len(X_test)} test feature vectors of dimension {X_test.shape[1]}")
+    print(f"   Correct answer (-1): {sum(y_test == -1)}")
+    print(f"   Agrees with hint (+1): {sum(y_test == 1)}")
+    
+    # Train probe
     print("\n" + "="*80)
-    print("TRAINING PROBE 1: Agrees vs Against Hint")
+    print("TRAINING LINEAR PROBE")
     print("="*80)
     
-    X1, y1, idx1 = prepare_probe1_data(features, categories, question_indices)
+    probe_results = train_linear_probe(X_train, y_train, X_test, y_test, random_state)
     
-    print(f"\n📊 Probe 1 Data:")
-    print(f"   Total samples: {len(y1)}")
-    print(f"   Agrees with hint (+1): {sum(y1 == 1)}")
-    print(f"   Went against hint (-1): {sum(y1 == -1)}")
+    probe_labels = {
+        -1: "correct_answer (chose the correct answer)",
+        1: "agrees_with_hint (agreed with incorrect hint)"
+    }
+    print_probe_results(probe_results, "Correct Answer vs Agrees with Hint", probe_labels)
     
-    if len(y1) < 10:
-        print("⚠️  Not enough samples for Probe 1. Skipping...")
-        probe1_results = None
-    elif len(set(y1)) < 2:
-        print("⚠️  Only one class present in Probe 1 data. Skipping...")
-        probe1_results = None
-    else:
-        probe1_results = train_linear_probe(X1, y1, test_size, random_state)
-        
-        probe1_labels = {
-            1: "agrees_with_hint (chose the incorrect hint)",
-            -1: "went_against_hint (chose correct or other incorrect)"
-        }
-        print_probe_results(probe1_results, "Agrees vs Against Hint", probe1_labels)
-        
-        if save_results:
-            import os
-            os.makedirs(output_dir, exist_ok=True)
-            save_probe_results(
-                probe1_results,
-                "agrees_vs_against_hint",
-                f"{output_dir}/probe1_agrees_vs_against_layer{layer}_pos{position}.json",
-                layer, position, probe1_labels
-            )
+    if save_results:
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        save_probe_results(
+            probe_results,
+            "correct_vs_agrees_with_hint",
+            f"{output_dir}/probe_correct_vs_hint_layer{layer}.json",
+            layer, None, probe_labels
+        )
     
-    # ========================================================================
-    # PROBE 2: Distracted vs Found Answer
-    # ========================================================================
-    print("\n" + "="*80)
-    print("TRAINING PROBE 2: Distracted vs Found Answer")
-    print("="*80)
-    
-    X2, y2, idx2 = prepare_probe2_data(features, categories, question_indices)
-    
-    print(f"\n📊 Probe 2 Data:")
-    print(f"   Total samples: {len(y2)}")
-    print(f"   Distracted by hint (+1): {sum(y2 == 1)}")
-    print(f"   Found answer (-1): {sum(y2 == -1)}")
-    
-    if len(y2) < 10:
-        print("⚠️  Not enough samples for Probe 2. Skipping...")
-        probe2_results = None
-    elif len(set(y2)) < 2:
-        print("⚠️  Only one class present in Probe 2 data. Skipping...")
-        probe2_results = None
-    else:
-        probe2_results = train_linear_probe(X2, y2, test_size, random_state)
-        
-        probe2_labels = {
-            1: "distracted_by_hint (hit token limit)",
-            -1: "found_answer (answered within budget)"
-        }
-        print_probe_results(probe2_results, "Distracted vs Found Answer", probe2_labels)
-        
-        if save_results:
-            import os
-            os.makedirs(output_dir, exist_ok=True)
-            save_probe_results(
-                probe2_results,
-                "distracted_vs_found_answer",
-                f"{output_dir}/probe2_distracted_vs_found_layer{layer}_pos{position}.json",
-                layer, position, probe2_labels
-            )
-    
-    # ========================================================================
     # Summary
-    # ========================================================================
     print("\n" + "="*80)
     print("EXPERIMENT SUMMARY")
     print("="*80)
     print(f"\n📊 Configuration:")
     print(f"   Layer: {layer}")
-    print(f"   Position: {position}")
-    print(f"   Feature dimension: {features.shape[1]}")
+    print(f"   Feature dimension: {X_train.shape[1]}")
     
     print(f"\n📈 Results:")
-    if probe1_results:
-        print(f"   Probe 1 (Agrees vs Against): {probe1_results.accuracy*100:.2f}% accuracy")
-    else:
-        print(f"   Probe 1 (Agrees vs Against): Skipped (insufficient data)")
-    
-    if probe2_results:
-        print(f"   Probe 2 (Distracted vs Found): {probe2_results.accuracy*100:.2f}% accuracy")
-    else:
-        print(f"   Probe 2 (Distracted vs Found): Skipped (insufficient data)")
+    print(f"   Test Accuracy: {probe_results.accuracy*100:.2f}%")
+    print(f"   Cross-Val Accuracy: {probe_results.cross_val_accuracy*100:.2f}% ± {probe_results.cross_val_std*100:.2f}%")
     
     print("="*80)
     
-    return probe1_results, probe2_results
+    return probe_results
 
 
 # ============================================================================
@@ -549,34 +514,45 @@ def run_experiments(json_path: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train linear probes on residual stream hidden states",
+        description="Train linear probe on residual stream hidden states",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with auto-detected layer and position
-  python linear_probe_training.py hidden_values/labeled_results.json
+  # Basic usage with two bulk files
+  python linear_probe_training.py categorized_data.json bulk1.json bulk2.json
 
-  # Specify layer and position
-  python linear_probe_training.py hidden_values/labeled_results.json --layer 1 --position 114
+  # Specify layer
+  python linear_probe_training.py categorized_data.json bulk1.json bulk2.json --layer 1
 
-  # Change test split and random seed
-  python linear_probe_training.py hidden_values/labeled_results.json --test-size 0.3 --seed 123
+  # Change random seed
+  python linear_probe_training.py categorized_data.json bulk1.json bulk2.json --seed 123
 
-Expected JSON structure:
-  The input JSON should have a "results" array where each element has:
-    - "category": one of "correct_answer", "incorrect_not_hint", "chose_hint", "exceeded_budget"
-    - "residual_stream_hidden_states": {"layer_1": {"114": [...]}, ...}
+Expected JSON structures:
+  Categorized JSON:
+    {
+      "correct_answer": [{"question_idx": 5, "split": "train"}, ...],
+      "agrees_with_hint": [{"question_idx": 2, "split": "train"}, ...]
+    }
+  
+  Bulk JSON (each question has one token position saved per layer):
+    {
+      "results": [
+        {
+          "question_idx": 0,
+          "residual_stream_hidden_states": {"layer_1": {"143": [...]}, "layer_18": {"143": [...]}}
+        },
+        ...
+      ]
+    }
         """
     )
     
-    parser.add_argument('json_path', type=str,
-                        help='Path to labeled JSON file with residual stream data')
+    parser.add_argument('categorized_json', type=str,
+                        help='Path to categorized JSON file with question indices and labels')
+    parser.add_argument('bulk_files', type=str, nargs='+',
+                        help='Paths to bulk residual stream JSON files')
     parser.add_argument('--layer', type=int, default=None,
                         help='Layer to extract features from (auto-detected if not specified)')
-    parser.add_argument('--position', type=int, default=None,
-                        help='Token position to extract features from (auto-detected if not specified)')
-    parser.add_argument('--test-size', type=float, default=0.2,
-                        help='Fraction of data for test set (default: 0.2)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--output-dir', type=str, default='probe_results',
@@ -587,11 +563,10 @@ Expected JSON structure:
     args = parser.parse_args()
     
     try:
-        run_experiments(
-            json_path=args.json_path,
+        run_experiment(
+            categorized_json_path=args.categorized_json,
+            bulk_files=args.bulk_files,
             layer=args.layer,
-            position=args.position,
-            test_size=args.test_size,
             random_state=args.seed,
             save_results=not args.no_save,
             output_dir=args.output_dir
