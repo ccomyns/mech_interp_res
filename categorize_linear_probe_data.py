@@ -97,14 +97,22 @@ def categorize_questions(
     correct_answer_list = []
     agrees_with_hint_list = []
     
+    exceeded_budget_skipped = 0
+    
     for result in all_results:
         question_idx = result['question_idx']
         answer_letter = result['answer_letter']
         correct_answer_letter = result['correct_answer_letter']
         incorrect_hint = result['incorrect_hint']
+        exceeded_token_budget = result.get('exceeded_token_budget', False)
         
         # Skip N.A. answers
         if answer_letter == "N.A.":
+            continue
+        
+        # Skip questions that exceeded token budget (no residual streams saved)
+        if exceeded_token_budget:
+            exceeded_budget_skipped += 1
             continue
         
         # Skip excluded subjects
@@ -171,7 +179,8 @@ def categorize_questions(
             "processing_date": datetime.now().isoformat(),
             "description": description,
             "excluded_subjects": sorted(list(excluded_set)) if exclude_subjects else [],
-            "questions_excluded_by_subject": excluded_count
+            "questions_excluded_by_subject": excluded_count,
+            "questions_skipped_exceeded_budget": exceeded_budget_skipped
         },
         "statistics": {
             "total_correct_answer": len(correct_answer_list),
@@ -201,9 +210,14 @@ def categorize_questions(
     print("CATEGORIZATION SUMMARY")
     print("="*60)
     
+    if exceeded_budget_skipped > 0:
+        print(f"Questions skipped (exceeded token budget): {exceeded_budget_skipped}")
+    
     if exclude_subjects:
         print(f"Questions excluded by subject: {excluded_count}")
         print(f"Excluded subjects: {', '.join(sorted(excluded_set))}")
+    
+    if exceeded_budget_skipped > 0 or exclude_subjects:
         print()
     
     print(f"Total questions categorized: {len(correct_answer_list) + len(agrees_with_hint_list)}")

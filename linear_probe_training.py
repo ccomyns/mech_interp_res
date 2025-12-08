@@ -136,7 +136,7 @@ def load_bulk_residual_streams(bulk_files: List[str],
         
         results = data.get('results', [])
         
-    for result in results:
+        for result in results:
             q_idx = result.get('question_idx')
             if q_idx in target_indices:
                 residual_streams[q_idx] = {
@@ -179,19 +179,28 @@ def extract_features_from_categorized(categorized_data: Dict[str, List[Dict]],
     
     layer_key = f"layer_{layer}"
     
+    # Debug counters
+    correct_split_match = 0
+    correct_not_in_streams = 0
+    correct_no_layer = 0
+    correct_success = 0
+    
     # Process correct_answer category (label = -1)
     for item in categorized_data['correct_answer']:
         if item.get('split') != split:
             continue
+        correct_split_match += 1
             
         q_idx = item['question_idx']
         
         if q_idx not in residual_streams:
+            correct_not_in_streams += 1
             continue
         
         hidden_states = residual_streams[q_idx].get('residual_stream_hidden_states', {})
         
         if layer_key not in hidden_states:
+            correct_no_layer += 1
             continue
         
         # Get the single position available for this question
@@ -205,20 +214,30 @@ def extract_features_from_categorized(categorized_data: Dict[str, List[Dict]],
         features.append(hidden_vector)
         labels.append(-1)  # correct_answer
         question_indices.append(q_idx)
+        correct_success += 1
+    
+    # Debug counters for agrees_with_hint
+    hint_split_match = 0
+    hint_not_in_streams = 0
+    hint_no_layer = 0
+    hint_success = 0
     
     # Process agrees_with_hint category (label = +1)
     for item in categorized_data['agrees_with_hint']:
         if item.get('split') != split:
             continue
+        hint_split_match += 1
             
         q_idx = item['question_idx']
         
         if q_idx not in residual_streams:
+            hint_not_in_streams += 1
             continue
         
         hidden_states = residual_streams[q_idx].get('residual_stream_hidden_states', {})
         
         if layer_key not in hidden_states:
+            hint_no_layer += 1
             continue
         
         # Get the single position available for this question
@@ -232,6 +251,11 @@ def extract_features_from_categorized(categorized_data: Dict[str, List[Dict]],
         features.append(hidden_vector)
         labels.append(+1)  # agrees_with_hint
         question_indices.append(q_idx)
+        hint_success += 1
+    
+    # Print debug info
+    print(f"\n   [DEBUG] correct_answer ({split}): split_match={correct_split_match}, not_in_streams={correct_not_in_streams}, no_layer={correct_no_layer}, success={correct_success}")
+    print(f"   [DEBUG] agrees_with_hint ({split}): split_match={hint_split_match}, not_in_streams={hint_not_in_streams}, no_layer={hint_no_layer}, success={hint_success}")
     
     return np.array(features), np.array(labels), question_indices
 
