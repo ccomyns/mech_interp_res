@@ -136,7 +136,7 @@ def load_bulk_residual_streams(bulk_files: List[str],
         
         results = data.get('results', [])
         
-        for result in results:
+    for result in results:
             q_idx = result.get('question_idx')
             if q_idx in target_indices:
                 residual_streams[q_idx] = {
@@ -156,7 +156,7 @@ def load_bulk_residual_streams(bulk_files: List[str],
 
 def extract_features_from_categorized(categorized_data: Dict[str, List[Dict]],
                                       residual_streams: Dict[int, Dict[str, Any]],
-                                      layer: int,
+                     layer: int, 
                                       split: str = 'train') -> Tuple[np.ndarray, np.ndarray, List[int]]:
     """
     Extract feature vectors and labels from categorized data and residual streams.
@@ -402,10 +402,10 @@ def save_probe_results(results: ProbeResults,
 
 def run_experiment(categorized_json_path: str,
                    bulk_files: List[str],
-                   layer: Optional[int] = None,
-                   random_state: int = 42,
-                   save_results: bool = True,
-                   output_dir: str = "probe_results"):
+                    layer: Optional[int] = None,
+                    random_state: int = 42,
+                    save_results: bool = True,
+                    output_dir: str = "probe_results"):
     """
     Run linear probe experiment: Correct Answer vs Agrees with Hint.
     
@@ -474,20 +474,20 @@ def run_experiment(categorized_json_path: str,
     print("="*80)
     
     probe_results = train_linear_probe(X_train, y_train, X_test, y_test, random_state)
-    
+        
     probe_labels = {
         -1: "correct_answer (chose the correct answer)",
         1: "agrees_with_hint (agreed with incorrect hint)"
-    }
+        }
     print_probe_results(probe_results, "Correct Answer vs Agrees with Hint", probe_labels)
-    
+        
     if save_results:
         import os
         os.makedirs(output_dir, exist_ok=True)
         save_probe_results(
             probe_results,
             "correct_vs_agrees_with_hint",
-            f"{output_dir}/probe_correct_vs_hint_layer{layer}.json",
+            f"{output_dir}/probe_correct_vs_hint_layer{layer}_manual_review.json",
             layer, None, probe_labels
         )
     
