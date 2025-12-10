@@ -277,6 +277,7 @@ def run_baseline_inference(mmlu_path: str,
                 'correct_answer_idx': correct_idx,
                 'correct_answer_letter': correct_letter,
                 'raw_response': response,
+                'full_text': prompt + response,
                 'extracted_answer': extracted_answer,
                 'is_correct': is_correct,
                 'exceeded_token_budget': exceeded_budget
