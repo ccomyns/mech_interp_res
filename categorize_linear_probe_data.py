@@ -98,6 +98,7 @@ def categorize_questions(
     agrees_with_hint_list = []
     
     exceeded_budget_skipped = 0
+    baseline_incorrect_skipped = 0
     
     for result in all_results:
         question_idx = result['question_idx']
@@ -105,6 +106,7 @@ def categorize_questions(
         correct_answer_letter = result['correct_answer_letter']
         incorrect_hint = result['incorrect_hint']
         exceeded_token_budget = result.get('exceeded_token_budget', False)
+        baseline_correct = result.get('baseline_correct', None)
         
         # Skip N.A. answers
         if answer_letter == "N.A.":
@@ -113,6 +115,11 @@ def categorize_questions(
         # Skip questions that exceeded token budget (no residual streams saved)
         if exceeded_token_budget:
             exceeded_budget_skipped += 1
+            continue
+        
+        # Skip questions where baseline was incorrect (only include baseline_correct=True)
+        if baseline_correct is not True:
+            baseline_incorrect_skipped += 1
             continue
         
         # Skip excluded subjects
@@ -168,7 +175,7 @@ def categorize_questions(
     hint_test = sum(1 for x in agrees_with_hint_list if x['split'] == 'test')
     
     # Build description
-    description = "Questions categorized by whether model selected correct answer or agreed with incorrect hint. First 200 of each category are train, rest are test."
+    description = "Questions categorized by whether model selected correct answer or agreed with incorrect hint. First 200 of each category are train, rest are test. Only includes questions where baseline_correct=True."
     if exclude_subjects:
         description += f" Excluded subjects: {', '.join(sorted(excluded_set))}."
     
@@ -180,7 +187,8 @@ def categorize_questions(
             "description": description,
             "excluded_subjects": sorted(list(excluded_set)) if exclude_subjects else [],
             "questions_excluded_by_subject": excluded_count,
-            "questions_skipped_exceeded_budget": exceeded_budget_skipped
+            "questions_skipped_exceeded_budget": exceeded_budget_skipped,
+            "questions_skipped_baseline_incorrect": baseline_incorrect_skipped
         },
         "statistics": {
             "total_correct_answer": len(correct_answer_list),
@@ -213,11 +221,14 @@ def categorize_questions(
     if exceeded_budget_skipped > 0:
         print(f"Questions skipped (exceeded token budget): {exceeded_budget_skipped}")
     
+    if baseline_incorrect_skipped > 0:
+        print(f"Questions skipped (baseline_correct=False): {baseline_incorrect_skipped}")
+    
     if exclude_subjects:
         print(f"Questions excluded by subject: {excluded_count}")
         print(f"Excluded subjects: {', '.join(sorted(excluded_set))}")
     
-    if exceeded_budget_skipped > 0 or exclude_subjects:
+    if exceeded_budget_skipped > 0 or baseline_incorrect_skipped > 0 or exclude_subjects:
         print()
     
     print(f"Total questions categorized: {len(correct_answer_list) + len(agrees_with_hint_list)}")
