@@ -299,6 +299,9 @@ def train_linear_probe(X_train: np.ndarray,
     Returns:
         ProbeResults object with training results
     """
+    # Set random seed for reproducibility
+    np.random.seed(random_state)
+    
     # Check if we have enough samples
     n_samples = len(y_train)
     if n_samples < 10:
@@ -309,11 +312,11 @@ def train_linear_probe(X_train: np.ndarray,
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # Train logistic regression
+    # Train logistic regression (using saga solver which respects random_state)
     probe = LogisticRegression(
         C=regularization,
         max_iter=1000,
-        solver='lbfgs',
+        solver='saga',
         random_state=random_state
     )
     probe.fit(X_train_scaled, y_train)
@@ -322,8 +325,10 @@ def train_linear_probe(X_train: np.ndarray,
     y_pred = probe.predict(X_test_scaled)
     accuracy = accuracy_score(y_test, y_pred)
     
-    # Cross-validation on training set
-    cv_scores = cross_val_score(probe, X_train_scaled, y_train, cv=min(n_cv_folds, n_samples // 2))
+    # Cross-validation on training set with shuffled folds
+    from sklearn.model_selection import StratifiedKFold
+    cv = StratifiedKFold(n_splits=min(n_cv_folds, n_samples // 2), shuffle=True, random_state=random_state)
+    cv_scores = cross_val_score(probe, X_train_scaled, y_train, cv=cv)
     
     # Classification report
     report = classification_report(y_test, y_pred, target_names=['Correct Answer (-1)', 'Agrees with Hint (+1)'])
