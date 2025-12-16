@@ -35,7 +35,9 @@ def get_all_subjects() -> List[str]:
 def load_mmlu_questions(
     subjects: Optional[List[str]] = None,
     split: str = "test",
-    max_per_subject: Optional[int] = None
+    max_per_subject: Optional[int] = None,
+    start_idx: int = 0,
+    end_idx: Optional[int] = None
 ) -> List[dict]:
     """
     Load MMLU questions from HuggingFace.
@@ -44,6 +46,8 @@ def load_mmlu_questions(
         subjects: List of subject names to load. If None, loads all subjects.
         split: Dataset split to use ('test', 'validation', 'dev', 'auxiliary_train')
         max_per_subject: Maximum number of questions per subject. None for all.
+        start_idx: Starting index for questions (0-based, inclusive).
+        end_idx: Ending index for questions (exclusive). None means no upper limit.
     
     Returns:
         List of question dictionaries
@@ -56,6 +60,7 @@ def load_mmlu_questions(
     
     print(f"Loading MMLU questions from {len(subjects)} subjects...")
     print(f"Split: {split}")
+    print(f"Question range: {start_idx} to {end_idx if end_idx else 'end'}")
     if max_per_subject:
         print(f"Max per subject: {max_per_subject}")
     print()
@@ -69,8 +74,18 @@ def load_mmlu_questions(
             
             # Convert to list of dicts
             questions = []
+            collected = 0
             for idx, item in enumerate(dataset):
-                if max_per_subject and idx >= max_per_subject:
+                # Skip questions before start_idx
+                if idx < start_idx:
+                    continue
+                
+                # Stop at end_idx
+                if end_idx is not None and idx >= end_idx:
+                    break
+                
+                # Check max_per_subject limit
+                if max_per_subject and collected >= max_per_subject:
                     break
                 
                 question_data = {
@@ -81,6 +96,7 @@ def load_mmlu_questions(
                     "answer_letter": chr(65 + item["answer"])  # A, B, C, or D
                 }
                 questions.append(question_data)
+                collected += 1
             
             all_questions.extend(questions)
             print(f"{len(questions)} questions")
@@ -92,7 +108,8 @@ def load_mmlu_questions(
     return all_questions
 
 
-def save_questions(questions: List[dict], output_path: str, split: str):
+def save_questions(questions: List[dict], output_path: str, split: str, 
+                   start_idx: int = 0, end_idx: Optional[int] = None):
     """Save questions to a JSON file with metadata."""
     
     # Count questions per subject
@@ -107,6 +124,10 @@ def save_questions(questions: List[dict], output_path: str, split: str):
             "split": split,
             "total_questions": len(questions),
             "num_subjects": len(subject_counts),
+            "question_range": {
+                "start_idx": start_idx,
+                "end_idx": end_idx
+            },
             "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         },
         "subject_counts": subject_counts,
@@ -149,6 +170,18 @@ def main():
         help="Maximum number of questions per subject (default: all)"
     )
     parser.add_argument(
+        "--start-idx",
+        type=int,
+        default=0,
+        help="Starting question index per subject (0-based, inclusive, default: 0)"
+    )
+    parser.add_argument(
+        "--end-idx",
+        type=int,
+        default=None,
+        help="Ending question index per subject (exclusive, default: no limit)"
+    )
+    parser.add_argument(
         "--list-subjects",
         action="store_true",
         help="List all available MMLU subjects and exit"
@@ -180,7 +213,9 @@ def main():
     questions = load_mmlu_questions(
         subjects=subjects,
         split=args.split,
-        max_per_subject=args.max_per_subject
+        max_per_subject=args.max_per_subject,
+        start_idx=args.start_idx,
+        end_idx=args.end_idx
     )
     
     if not questions:
@@ -188,13 +223,14 @@ def main():
         return
     
     # Save to file
-    save_questions(questions, args.output, args.split)
+    save_questions(questions, args.output, args.split, args.start_idx, args.end_idx)
     
     # Print summary
     print("\n" + "=" * 50)
     print("Summary:")
     print(f"  Total questions: {len(questions)}")
     print(f"  Split: {args.split}")
+    print(f"  Question range: {args.start_idx} to {args.end_idx if args.end_idx else 'end'}")
     print(f"  Output file: {args.output}")
 
 
