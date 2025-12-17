@@ -14,20 +14,20 @@ from pathlib import Path
 
 def extract_final_answers(raw_response: str) -> dict:
     """
-    Search for answer patterns in the raw response.
+    Search for answer patterns in the last 100 characters of the raw response.
     
-    First tries the main pattern across the entire text:
-    - "Final Answer: A\n"
-    - "Final Answer: A*"
-    - "Final Answer: A." 
-    - "Final Answer: A " (with trailing space or end of string)
-    
-    If no match found, checks the last 100 characters for additional patterns:
+    Patterns checked (in order, first match wins):
     - "Therefore, my answer is {letter}"
     - "Therefore, the answer is {letter}"
     - "**Final Answer:** {letter}"
     - "**Answer:** {letter}"
     - "Answer: {letter}"
+    - "The final answer is {letter}"
+    - "The final answer is $\\boxed{letter}$"
+    - "My final answer is {letter}"
+    - "The correct answer is {letter}"
+    - "the best answer is {letter}"
+    - "**Final Answer: {letter}**"
     
     Args:
         raw_response: The model's raw response text
@@ -35,36 +35,33 @@ def extract_final_answers(raw_response: str) -> dict:
     Returns:
         dict with regex_match, num_regex_matches, answer_letter, all_matches
     """
-    # Primary pattern matches "Final Answer:" followed by optional whitespace, 
-    # then a letter A-D, followed by newline, asterisk, period, space, or end of string
-    primary_pattern = r'Final Answer:\s*([ABCD])(?:\n|\*|\.|\s|$)'
+    # Only search the last 100 characters
+    last_100_chars = raw_response[-100:] if len(raw_response) > 100 else raw_response
     
-    matches = re.findall(primary_pattern, raw_response, re.IGNORECASE)
+    # Patterns to check in the last 100 characters
+    patterns = [
+        r'Therefore,\s+my\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'Therefore,\s+the\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'\*\*Final\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+        r'\*\*Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+        r'Answer:\s+([ABCD])(?:\.|,|\s|$)',
+        r'The\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'The\s+final\s+answer\s+is\s+\$\\boxed\{([ABCD])\}\$',
+        r'My\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'The\s+correct\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'the\s+best\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'\*\*Final\s+Answer:\s*([ABCD])\*\*'
+    ]
     
-    # Normalize matches to uppercase
-    matches = [m.upper() for m in matches]
+    matches = []
+    num_matches = 0
     
-    num_matches = len(matches)
-    
-    # If no matches found with primary pattern, check last 100 characters with additional patterns
-    if num_matches == 0:
-        last_100_chars = raw_response[-100:] if len(raw_response) > 100 else raw_response
-        
-        # Additional patterns to check in the last 100 characters
-        additional_patterns = [
-            r'Therefore,\s+my\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
-            r'Therefore,\s+the\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
-            r'\*\*Final\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
-            r'\*\*Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
-            r'Answer:\s+([ABCD])(?:\.|,|\s|$)'
-        ]
-        
-        for pattern in additional_patterns:
-            matches = re.findall(pattern, last_100_chars, re.IGNORECASE)
-            if matches:
-                matches = [m.upper() for m in matches]
-                num_matches = len(matches)
-                break
+    for pattern in patterns:
+        matches = re.findall(pattern, last_100_chars, re.IGNORECASE)
+        if matches:
+            matches = [m.upper() for m in matches]
+            num_matches = len(matches)
+            break
     
     if num_matches == 0:
         return {
@@ -212,13 +209,19 @@ def process_bulk_extraction(input_path: str, output_path: str = None, create_man
             "processing_date": datetime.now().isoformat(),
             "total_questions": total_questions,
             "regex_patterns": {
-                "primary": r'Final Answer:\s*([ABCD])(?:\n|\*|\.|\s|$)',
-                "additional_last_100_chars": [
+                "search_region": "last_100_characters",
+                "patterns": [
                     r'Therefore,\s+my\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
                     r'Therefore,\s+the\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
                     r'\*\*Final\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
                     r'\*\*Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
-                    r'Answer:\s+([ABCD])(?:\.|,|\s|$)'
+                    r'Answer:\s+([ABCD])(?:\.|,|\s|$)',
+                    r'The\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'The\s+final\s+answer\s+is\s+\$\\boxed\{([ABCD])\}\$',
+                    r'My\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'The\s+correct\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'the\s+best\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'\*\*Final\s+Answer:\s*([ABCD])\*\*'
                 ]
             }
         },
