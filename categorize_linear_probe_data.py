@@ -1,11 +1,11 @@
 """
 Categorize Linear Probe Training Data
 
-This script takes two cleaned answer JSON files and categorizes questions into:
+This script takes one or two cleaned answer JSON files and categorizes questions into:
 1. correct_answer: Questions where the model selected the correct answer
 2. agrees_with_hint: Questions where the model agreed with the incorrect hint
 
-For each category, the first 200 questions are labeled as 'train' and 
+For each category, the first 150 questions are labeled as 'train' and 
 the remaining are labeled as 'test'.
 
 Supports excluding specific subjects (e.g., math-related subjects).
@@ -50,32 +50,27 @@ def load_subject_mapping(mmlu_path: str) -> dict:
 
 
 def categorize_questions(
-    input_file1: str, 
-    input_file2: str, 
+    input_files: List[str], 
     output_file: str = None,
     mmlu_path: str = None,
     exclude_subjects: List[str] = None
 ):
     """
-    Categorize questions from two cleaned answer files.
+    Categorize questions from one or more cleaned answer files.
     
     Args:
-        input_file1: Path to first cleaned answers JSON
-        input_file2: Path to second cleaned answers JSON
+        input_files: List of paths to cleaned answers JSON files (1 or 2 files)
         output_file: Optional path for output JSON (auto-generated if not provided)
         mmlu_path: Path to MMLU dataset for subject lookup (required if excluding subjects)
         exclude_subjects: List of subjects to exclude from categorization
     """
-    print(f"Loading data from: {input_file1}")
-    with open(input_file1, 'r') as f:
-        data1 = json.load(f)
+    all_results = []
     
-    print(f"Loading data from: {input_file2}")
-    with open(input_file2, 'r') as f:
-        data2 = json.load(f)
-    
-    # Combine results from both files
-    all_results = data1['results'] + data2['results']
+    for input_file in input_files:
+        print(f"Loading data from: {input_file}")
+        with open(input_file, 'r') as f:
+            data = json.load(f)
+        all_results.extend(data['results'])
     
     print(f"Total questions: {len(all_results)}")
     
@@ -155,15 +150,15 @@ def categorize_questions(
             agrees_with_hint_list.append(entry)
     
     # Add train/test labels
-    # First 200 in each category are 'train', rest are 'test'
+    # First 150 in each category are 'train', rest are 'test'
     for i, item in enumerate(correct_answer_list):
-        if i < 200:
+        if i < 150:
             item['split'] = 'train'
         else:
             item['split'] = 'test'
     
     for i, item in enumerate(agrees_with_hint_list):
-        if i < 200:
+        if i < 150:
             item['split'] = 'train'
         else:
             item['split'] = 'test'
@@ -175,14 +170,14 @@ def categorize_questions(
     hint_test = sum(1 for x in agrees_with_hint_list if x['split'] == 'test')
     
     # Build description
-    description = "Questions categorized by whether model selected correct answer or agreed with incorrect hint. First 200 of each category are train, rest are test. Only includes questions where baseline_correct=True."
+    description = "Questions categorized by whether model selected correct answer or agreed with incorrect hint. First 150 of each category are train, rest are test. Only includes questions where baseline_correct=True."
     if exclude_subjects:
         description += f" Excluded subjects: {', '.join(sorted(excluded_set))}."
     
     # Create output structure
     output_data = {
         "metadata": {
-            "source_files": [str(input_file1), str(input_file2)],
+            "source_files": [str(f) for f in input_files],
             "processing_date": datetime.now().isoformat(),
             "description": description,
             "excluded_subjects": sorted(list(excluded_set)) if exclude_subjects else [],
@@ -206,7 +201,7 @@ def categorize_questions(
     if output_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = "_no_math" if exclude_subjects else ""
-        output_file = Path(input_file1).parent / f"categorized_data{suffix}_{timestamp}.json"
+        output_file = Path(input_files[0]).parent / f"categorized_data{suffix}_{timestamp}.json"
     
     # Save output
     print(f"\nSaving results to: {output_file}")
@@ -249,36 +244,34 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic usage (no subject filtering):
+    # Single file:
+    python categorize_linear_probe_data.py \\
+        linear_probe_mode_2/cleaned_answers_mode_2.json
+
+    # Two files:
     python categorize_linear_probe_data.py \\
         data_collection_linear_probe/cleaned_answers_first_half.json \\
         data_collection_linear_probe/cleaned_answers_second_half.json
 
     # Exclude math-related subjects:
     python categorize_linear_probe_data.py \\
-        data_collection_linear_probe/cleaned_answers_first_half.json \\
-        data_collection_linear_probe/cleaned_answers_second_half.json \\
+        linear_probe_mode_2/cleaned_answers_mode_2.json \\
         --mmlu-dataset mmlu_sample_dataset.json \\
         --exclude-subjects abstract_algebra college_mathematics elementary_mathematics \\
             high_school_mathematics high_school_statistics econometrics
 
     # Use --exclude-math shortcut:
     python categorize_linear_probe_data.py \\
-        data_collection_linear_probe/cleaned_answers_first_half.json \\
-        data_collection_linear_probe/cleaned_answers_second_half.json \\
+        linear_probe_mode_2/cleaned_answers_mode_2.json \\
         --mmlu-dataset mmlu_sample_dataset.json \\
         --exclude-math
         """
     )
     parser.add_argument(
-        "first_half",
+        "input_files",
         type=str,
-        help="Path to the first cleaned answers JSON file"
-    )
-    parser.add_argument(
-        "second_half",
-        type=str,
-        help="Path to the second cleaned answers JSON file"
+        nargs='+',
+        help="Path(s) to cleaned answers JSON file(s) - can provide 1 or 2 files"
     )
     parser.add_argument(
         "-o", "--output",
@@ -321,8 +314,7 @@ Examples:
         parser.error("--mmlu-dataset is required when using --exclude-subjects or --exclude-math")
     
     categorize_questions(
-        args.first_half, 
-        args.second_half, 
+        args.input_files, 
         args.output,
         args.mmlu_dataset,
         exclude_subjects
