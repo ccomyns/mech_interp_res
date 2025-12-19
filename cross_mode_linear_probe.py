@@ -307,8 +307,9 @@ def save_results(results: Dict, output_path: str, config: Dict):
         'metadata': {
             'evaluation_date': datetime.now().isoformat(),
             'probe_source': config['probe_path'],
-            'eval_categorized': config['categorized_path'],
-            'eval_bulk': config['bulk_path'],
+            'eval_categorized': config.get('categorized_path', 'N/A'),
+            'eval_bulk': config.get('bulk_path', 'N/A'),
+            'zebra_file': config.get('zebra_path', 'N/A'),
             'layer': config['layer'],
             'split_evaluated': config.get('split', 'all')
         },
@@ -319,6 +320,132 @@ def save_results(results: Dict, output_path: str, config: Dict):
         json.dump(output_data, f, indent=2)
     
     print(f"\n💾 Saved results to: {output_path}")
+
+
+def load_zebra_data(zebra_path: str, layer: int) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+    """
+    Load zebra puzzle data and extract features for specific partial scores.
+    
+    Maps:
+    - partial_score == 1.0 -> label -1 (correct_answer)
+    - partial_score == 0.333... -> label +1 (agrees_with_hint / fooled by red herrings)
+    
+    Args:
+        zebra_path: Path to zebra residual stream JSON
+        layer: Layer to extract features from
+        
+    Returns:
+        Tuple of (features array, labels array, puzzle indices)
+    """
+    print(f"\n📂 Loading zebra puzzle data from: {zebra_path}")
+    
+    with open(zebra_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    results = data.get('results', [])
+    print(f"   Total puzzles in file: {len(results)}")
+    
+    features = []
+    labels = []
+    puzzle_indices = []
+    
+    layer_key = f"layer_{layer}"
+    
+    # Target partial scores
+    CORRECT_SCORE = 1.0
+    HINT_SCORE = 1/3  # 0.333...
+    TOLERANCE = 0.01  # Allow small floating point differences
+    
+    correct_count = 0
+    hint_count = 0
+    skipped_count = 0
+    
+    for result in results:
+        partial_score = result.get('partial_score', -1)
+        puzzle_idx = result.get('puzzle_idx')
+        
+        # Check if this is a score we want
+        is_correct = abs(partial_score - CORRECT_SCORE) < TOLERANCE
+        is_hint = abs(partial_score - HINT_SCORE) < TOLERANCE
+        
+        if not is_correct and not is_hint:
+            skipped_count += 1
+            continue
+        
+        # Get hidden states
+        hidden_states = result.get('residual_stream_hidden_states', {})
+        if layer_key not in hidden_states:
+            continue
+        
+        layer_data = hidden_states[layer_key]
+        if not layer_data:
+            continue
+        
+        # Get the first position available
+        position_key = list(layer_data.keys())[0]
+        hidden_vector = np.array(layer_data[position_key])
+        
+        features.append(hidden_vector)
+        puzzle_indices.append(puzzle_idx)
+        
+        if is_correct:
+            labels.append(-1)  # correct_answer
+            correct_count += 1
+        else:
+            labels.append(+1)  # agrees_with_hint (fooled by red herrings)
+            hint_count += 1
+    
+    print(f"✅ Loaded zebra puzzle data")
+    print(f"   Correct (partial_score=1.0, label=-1): {correct_count}")
+    print(f"   Fooled (partial_score~0.33, label=+1): {hint_count}")
+    print(f"   Skipped (other partial scores): {skipped_count}")
+    
+    return np.array(features), np.array(labels), puzzle_indices
+
+
+def run_zebra_evaluation(probe_path: str,
+                         zebra_path: str,
+                         output_path: Optional[str] = None):
+    """
+    Run linear probe evaluation on zebra puzzle data.
+    
+    Args:
+        probe_path: Path to trained probe JSON
+        zebra_path: Path to zebra residual stream JSON
+        output_path: Optional path to save results
+    """
+    # Load probe
+    weights, bias, layer = load_probe(probe_path)
+    
+    # Load zebra data
+    X, y_true, puzzle_indices = load_zebra_data(zebra_path, layer)
+    
+    if len(X) == 0:
+        raise ValueError("No valid features extracted from zebra data!")
+    
+    print(f"\n✅ Extracted {len(X)} feature vectors")
+    print(f"   Correct (label=-1): {sum(y_true == -1)}")
+    print(f"   Fooled (label=+1): {sum(y_true == 1)}")
+    
+    # Apply probe
+    print(f"\n🔮 Applying probe to features...")
+    y_pred, scores = apply_probe(X, weights, bias)
+    
+    # Print results
+    probe_name = Path(probe_path).stem
+    zebra_name = Path(zebra_path).stem
+    results = print_results(y_true, y_pred, scores, probe_name, f"zebra:{zebra_name}")
+    
+    # Save results if requested
+    if output_path:
+        config = {
+            'probe_path': probe_path,
+            'zebra_path': zebra_path,
+            'layer': layer
+        }
+        save_results(results, output_path, config)
+    
+    return results
 
 
 def run_cross_mode_evaluation(probe_path: str,
@@ -410,30 +537,49 @@ Examples:
         linear_probe_mode_2/categorized_data_no_math_20251217_150300.json \\
         linear_probe_mode_2/bulk_residual_stream_incorrect_hint_2_q0-1139_tokens1_20251216_224948.json \\
         --split test
+
+    # Evaluate on zebra puzzle data
+    python cross_mode_linear_probe.py \\
+        probe_results/combined_probe_layer18.json \\
+        --zebra zebra_puzzles/zebra_residual_test_n1000_tokens1_20251218_225833.json
         """
     )
     
     parser.add_argument('probe_json', type=str,
                         help='Path to trained probe JSON file')
-    parser.add_argument('categorized_json', type=str,
-                        help='Path to categorized data JSON for evaluation')
-    parser.add_argument('bulk_json', type=str,
-                        help='Path to bulk residual stream JSON for evaluation')
+    parser.add_argument('categorized_json', type=str, nargs='?', default=None,
+                        help='Path to categorized data JSON for evaluation (not needed with --zebra)')
+    parser.add_argument('bulk_json', type=str, nargs='?', default=None,
+                        help='Path to bulk residual stream JSON for evaluation (not needed with --zebra)')
     parser.add_argument('--split', type=str, choices=['train', 'test'], default=None,
                         help='Evaluate only this split (default: evaluate all)')
+    parser.add_argument('--zebra', type=str, default=None,
+                        help='Path to zebra puzzle residual stream JSON (uses different data format)')
     parser.add_argument('-o', '--output', type=str, default=None,
                         help='Output path for results JSON')
     
     args = parser.parse_args()
     
     try:
-        run_cross_mode_evaluation(
-            probe_path=args.probe_json,
-            categorized_path=args.categorized_json,
-            bulk_path=args.bulk_json,
-            split=args.split,
-            output_path=args.output
-        )
+        if args.zebra:
+            # Zebra puzzle mode
+            run_zebra_evaluation(
+                probe_path=args.probe_json,
+                zebra_path=args.zebra,
+                output_path=args.output
+            )
+        else:
+            # Standard MMLU mode
+            if not args.categorized_json or not args.bulk_json:
+                parser.error("categorized_json and bulk_json are required unless using --zebra")
+            
+            run_cross_mode_evaluation(
+                probe_path=args.probe_json,
+                categorized_path=args.categorized_json,
+                bulk_path=args.bulk_json,
+                split=args.split,
+                output_path=args.output
+            )
     except KeyboardInterrupt:
         print("\n\n⚠️  Evaluation interrupted by user.")
     except Exception as e:

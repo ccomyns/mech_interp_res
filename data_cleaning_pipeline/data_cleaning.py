@@ -18,13 +18,17 @@ def extract_final_answers(raw_response: str) -> dict:
     
     Patterns checked (in order, first match wins):
     - "Therefore, my answer is {letter}"
+    - "Therefore, my answer is: {letter}"
     - "Therefore, the answer is {letter}"
     - "**Final Answer:** {letter}"
     - "**Answer:** {letter}"
+    - "**My Answer:** {letter}"
+    - "**Answer: {letter}**"
     - "Answer: {letter}"
     - "The final answer is {letter}"
     - "The final answer is $\\boxed{letter}$"
     - "My final answer is {letter}"
+    - "My final answer is: {letter}"
     - "The correct answer is {letter}"
     - "the best answer is {letter}"
     - "**Final Answer: {letter}**"
@@ -41,13 +45,17 @@ def extract_final_answers(raw_response: str) -> dict:
     # Patterns to check in the last 100 characters
     patterns = [
         r'Therefore,\s+my\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'Therefore,\s+my\s+answer\s+is:\s+([ABCD])(?:\.|,|\s|$)',
         r'Therefore,\s+the\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
         r'\*\*Final\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
         r'\*\*Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+        r'\*\*My\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+        r'\*\*Answer:\s+([ABCD])\*\*',
         r'Answer:\s+([ABCD])(?:\.|,|\s|$)',
         r'The\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
         r'The\s+final\s+answer\s+is\s+\$\\boxed\{([ABCD])\}\$',
         r'My\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+        r'My\s+final\s+answer\s+is:\s+([ABCD])(?:\.|,|\s|$)',
         r'The\s+correct\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
         r'the\s+best\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
         r'\*\*Final\s+Answer:\s*([ABCD])\*\*'
@@ -212,13 +220,17 @@ def process_bulk_extraction(input_path: str, output_path: str = None, create_man
                 "search_region": "last_100_characters",
                 "patterns": [
                     r'Therefore,\s+my\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'Therefore,\s+my\s+answer\s+is:\s+([ABCD])(?:\.|,|\s|$)',
                     r'Therefore,\s+the\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
                     r'\*\*Final\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
                     r'\*\*Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+                    r'\*\*My\s+Answer:\*\*\s+([ABCD])(?:\.|,|\s|$)',
+                    r'\*\*Answer:\s+([ABCD])\*\*',
                     r'Answer:\s+([ABCD])(?:\.|,|\s|$)',
                     r'The\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
                     r'The\s+final\s+answer\s+is\s+\$\\boxed\{([ABCD])\}\$',
                     r'My\s+final\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
+                    r'My\s+final\s+answer\s+is:\s+([ABCD])(?:\.|,|\s|$)',
                     r'The\s+correct\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
                     r'the\s+best\s+answer\s+is\s+([ABCD])(?:\.|,|\s|$)',
                     r'\*\*Final\s+Answer:\s*([ABCD])\*\*'
