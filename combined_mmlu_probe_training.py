@@ -383,14 +383,18 @@ def save_results(results: ProbeResults,
                  train_mode_counts: Dict,
                  test_mode_counts: Dict):
     """Save results to JSON."""
+    metadata = {
+        'training_date': datetime.now().isoformat(),
+        'mode1_categorized': config['mode1_path'],
+        'mode2_categorized': config['mode2_path'],
+        'layer': config['layer'],
+        'random_seed': config['seed']
+    }
+    if config.get('mode3_path'):
+        metadata['mode3_categorized'] = config['mode3_path']
+    
     output_data = {
-        'metadata': {
-            'training_date': datetime.now().isoformat(),
-            'mode1_categorized': config['mode1_path'],
-            'mode2_categorized': config['mode2_path'],
-            'layer': config['layer'],
-            'random_seed': config['seed']
-        },
+        'metadata': metadata,
         'train_distribution': train_mode_counts,
         'test_distribution': test_mode_counts,
         'results': {
@@ -415,30 +419,41 @@ def save_results(results: ProbeResults,
 
 def run_combined_training(mode1_path: str,
                           mode2_path: str,
+                          mode3_path: Optional[str] = None,
                           layer: int = 18,
                           random_state: int = 42,
                           output_path: Optional[str] = None):
     """
-    Run combined linear probe training on data from two modes.
+    Run combined linear probe training on data from two or three modes.
     """
     print("="*80)
     print("COMBINED LINEAR PROBE TRAINING")
     print("="*80)
     print(f"\nMode 1: {mode1_path}")
     print(f"Mode 2: {mode2_path}")
+    if mode3_path:
+        print(f"Mode 3: {mode3_path}")
     print(f"Layer: {layer}")
     
-    # Load categorized data for both modes
+    # Load categorized data for both modes (and optionally mode 3)
     _, cat_data_1 = load_categorized_data(mode1_path)
     _, cat_data_2 = load_categorized_data(mode2_path)
+    cat_data_3 = None
+    if mode3_path:
+        _, cat_data_3 = load_categorized_data(mode3_path)
     
     # Resolve bulk files for each mode
     print("\n🔍 Resolving bulk residual stream files...")
     bulk_files_1 = resolve_bulk_files_from_categorized(mode1_path)
     bulk_files_2 = resolve_bulk_files_from_categorized(mode2_path)
+    bulk_files_3 = None
+    if mode3_path:
+        bulk_files_3 = resolve_bulk_files_from_categorized(mode3_path)
     
     print(f"   Mode 1 bulk files: {[Path(f).name for f in bulk_files_1]}")
     print(f"   Mode 2 bulk files: {[Path(f).name for f in bulk_files_2]}")
+    if bulk_files_3:
+        print(f"   Mode 3 bulk files: {[Path(f).name for f in bulk_files_3]}")
     
     # Get all question indices for each mode
     mode1_indices = []
@@ -449,9 +464,17 @@ def run_combined_training(mode1_path: str,
     for item in cat_data_2['correct_answer'] + cat_data_2['agrees_with_hint']:
         mode2_indices.append(item['question_idx'])
     
+    mode3_indices = []
+    if cat_data_3:
+        for item in cat_data_3['correct_answer'] + cat_data_3['agrees_with_hint']:
+            mode3_indices.append(item['question_idx'])
+    
     # Load residual streams
     residual_streams_1 = load_residual_streams(bulk_files_1, mode1_indices)
     residual_streams_2 = load_residual_streams(bulk_files_2, mode2_indices)
+    residual_streams_3 = None
+    if bulk_files_3:
+        residual_streams_3 = load_residual_streams(bulk_files_3, mode3_indices)
     
     # Extract features for training
     print(f"\n🔄 Extracting training features from layer {layer}...")
@@ -463,14 +486,29 @@ def run_combined_training(mode1_path: str,
         cat_data_2, residual_streams_2, layer, 'train', 'mode2'
     )
     
+    # Extract mode 3 if provided
+    X_train_3, y_train_3, modes_train_3 = None, None, []
+    if cat_data_3 and residual_streams_3:
+        X_train_3, y_train_3, _, modes_train_3 = extract_features(
+            cat_data_3, residual_streams_3, layer, 'train', 'mode3'
+        )
+    
     # Combine training data
-    X_train = np.vstack([X_train_1, X_train_2]) if len(X_train_1) > 0 and len(X_train_2) > 0 else (X_train_1 if len(X_train_1) > 0 else X_train_2)
-    y_train = np.concatenate([y_train_1, y_train_2])
-    train_modes = modes_train_1 + modes_train_2
+    train_arrays = [X_train_1, X_train_2]
+    train_labels = [y_train_1, y_train_2]
+    if X_train_3 is not None and len(X_train_3) > 0:
+        train_arrays.append(X_train_3)
+        train_labels.append(y_train_3)
+    
+    X_train = np.vstack([arr for arr in train_arrays if len(arr) > 0])
+    y_train = np.concatenate(train_labels)
+    train_modes = modes_train_1 + modes_train_2 + modes_train_3
     
     print(f"✅ Combined training data: {len(X_train)} samples")
     print(f"   Mode 1: {len(X_train_1)} samples (correct: {sum(y_train_1 == -1)}, hint: {sum(y_train_1 == 1)})")
     print(f"   Mode 2: {len(X_train_2)} samples (correct: {sum(y_train_2 == -1)}, hint: {sum(y_train_2 == 1)})")
+    if X_train_3 is not None and len(X_train_3) > 0:
+        print(f"   Mode 3: {len(X_train_3)} samples (correct: {sum(y_train_3 == -1)}, hint: {sum(y_train_3 == 1)})")
     
     # Extract features for testing
     print(f"\n🔄 Extracting test features from layer {layer}...")
@@ -482,14 +520,29 @@ def run_combined_training(mode1_path: str,
         cat_data_2, residual_streams_2, layer, 'test', 'mode2'
     )
     
+    # Extract mode 3 test if provided
+    X_test_3, y_test_3, modes_test_3 = None, None, []
+    if cat_data_3 and residual_streams_3:
+        X_test_3, y_test_3, _, modes_test_3 = extract_features(
+            cat_data_3, residual_streams_3, layer, 'test', 'mode3'
+        )
+    
     # Combine test data
-    X_test = np.vstack([X_test_1, X_test_2]) if len(X_test_1) > 0 and len(X_test_2) > 0 else (X_test_1 if len(X_test_1) > 0 else X_test_2)
-    y_test = np.concatenate([y_test_1, y_test_2])
-    test_modes = modes_test_1 + modes_test_2
+    test_arrays = [X_test_1, X_test_2]
+    test_labels = [y_test_1, y_test_2]
+    if X_test_3 is not None and len(X_test_3) > 0:
+        test_arrays.append(X_test_3)
+        test_labels.append(y_test_3)
+    
+    X_test = np.vstack([arr for arr in test_arrays if len(arr) > 0])
+    y_test = np.concatenate(test_labels)
+    test_modes = modes_test_1 + modes_test_2 + modes_test_3
     
     print(f"✅ Combined test data: {len(X_test)} samples")
     print(f"   Mode 1: {len(X_test_1)} samples (correct: {sum(y_test_1 == -1)}, hint: {sum(y_test_1 == 1)})")
     print(f"   Mode 2: {len(X_test_2)} samples (correct: {sum(y_test_2 == -1)}, hint: {sum(y_test_2 == 1)})")
+    if X_test_3 is not None and len(X_test_3) > 0:
+        print(f"   Mode 3: {len(X_test_3)} samples (correct: {sum(y_test_3 == -1)}, hint: {sum(y_test_3 == 1)})")
     
     # Train probe
     print("\n" + "="*80)
@@ -508,6 +561,11 @@ def run_combined_training(mode1_path: str,
         'mode2': {-1: int(sum(y_test_2 == -1)), 1: int(sum(y_test_2 == 1))}
     }
     
+    if X_train_3 is not None and len(X_train_3) > 0:
+        train_mode_counts['mode3'] = {-1: int(sum(y_train_3 == -1)), 1: int(sum(y_train_3 == 1))}
+    if X_test_3 is not None and len(X_test_3) > 0:
+        test_mode_counts['mode3'] = {-1: int(sum(y_test_3 == -1)), 1: int(sum(y_test_3 == 1))}
+    
     # Print results
     print_results(results, train_mode_counts, test_mode_counts)
     
@@ -519,6 +577,7 @@ def run_combined_training(mode1_path: str,
         config = {
             'mode1_path': mode1_path,
             'mode2_path': mode2_path,
+            'mode3_path': mode3_path,
             'layer': layer,
             'seed': random_state
         }
@@ -529,21 +588,28 @@ def run_combined_training(mode1_path: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train a combined linear probe on data from two incorrect hint modes",
+        description="Train a combined linear probe on data from two or three incorrect hint modes",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic usage
+    # Basic usage (two modes)
     python combined_probe_training.py \\
         linear_probe_mode_1/categorized_data_no_math_20251215_234715.json \\
         linear_probe_mode_2/categorized_data_no_math_20251217_150300.json
+
+    # All three modes
+    python combined_probe_training.py \\
+        linear_probe_mode_1/categorized_data_no_math_20251215_234715.json \\
+        linear_probe_mode_2/categorized_data_no_math_20251217_150300.json \\
+        --mode3 linear_probe_mode_3/categorized_data_no_math_20251219_141840.json
 
     # Specify layer and output
     python combined_probe_training.py \\
         linear_probe_mode_1/categorized_data_no_math_20251215_234715.json \\
         linear_probe_mode_2/categorized_data_no_math_20251217_150300.json \\
+        --mode3 linear_probe_mode_3/categorized_data_no_math_20251219_141840.json \\
         --layer 18 \\
-        -o combined_probe_results.json
+        -o combined_probe_all_three_layer18.json
         """
     )
     
@@ -551,6 +617,8 @@ Examples:
                         help='Path to categorized JSON for mode 1')
     parser.add_argument('mode2_categorized', type=str,
                         help='Path to categorized JSON for mode 2')
+    parser.add_argument('--mode3', type=str, default=None,
+                        help='Path to categorized JSON for mode 3 (optional)')
     parser.add_argument('--layer', type=int, default=18,
                         help='Layer to extract features from (default: 18)')
     parser.add_argument('--seed', type=int, default=42,
@@ -564,6 +632,7 @@ Examples:
         run_combined_training(
             mode1_path=args.mode1_categorized,
             mode2_path=args.mode2_categorized,
+            mode3_path=args.mode3,
             layer=args.layer,
             random_state=args.seed,
             output_path=args.output
